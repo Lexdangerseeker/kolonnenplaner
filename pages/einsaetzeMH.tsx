@@ -124,7 +124,6 @@ function formatDE(dt?: Date|null): string {
 
 // --- Logik ---
 function pickFixedDate(raw: any, rhythmus: number, start_datum: string|null): string|null {
-  // fester Termin kann explizit in der Quelle heißen – oder wir nehmen start_datum, wenn KEIN Rhythmus
   const fixed = raw?.fest_termin ?? raw?.fixed_date ?? raw?.fester_termin ?? null;
   if (fixed) return String(fixed);
   if (!rhythmus) {
@@ -182,10 +181,8 @@ function evalStatus(b: B, now: Date): B {
   const r = (b.rhythmus_tage==null ? 0 : Number(b.rhythmus_tage));
   const hasRhythm = r > 0;
   const start = parseYMD(b.start_datum);
-  // „Fest“ kann aus explizitem fest_termin kommen – oder (Fallback) aus start_datum, wenn r==0
   const fixed = parseYMD(b.fest_termin || (r===0 ? b.start_datum || null : null));
 
-  // Rhythmus-Fall
   if (hasRhythm && start) {
     b.next_date = start;
     b.last_date = addDays(start, -r);
@@ -197,7 +194,6 @@ function evalStatus(b: B, now: Date): B {
     return b;
   }
 
-  // Kein Rhythmus → feste/lose Termine rechts
   b.column = "right";
   if (fixed) {
     b.next_date = fixed;
@@ -211,7 +207,6 @@ function evalStatus(b: B, now: Date): B {
     return b;
   }
 
-  // Grau: kein Termin hinterlegt
   b.next_date = null;
   b.last_date = start ? start : null;
   b.status = "gray";
@@ -246,13 +241,12 @@ function statusText(b: B): string {
 }
 function cardClass(b: B, blink: boolean): string {
   const base = "card ";
-  const map:any = { green:"card-green", yellow:"card-yellow", red:"card-red", blue:"card-blue", "yellow-blue":"card-yellowblue", pink:"card-pink", gray:"card-gray" };
+  thed const map:any = { green:"card-green", yellow:"card-yellow", red:"card-red", blue:"card-blue", "yellow-blue":"card-yellowblue", pink:"card-pink", gray:"card-gray" };
   return base + (map[b.status||"gray"]||"card-gray") + (blink?" blink":"");
 }
 function calcNextPreview(edit: EditState): Date|null {
   const r = Number(edit.rhythmus_tage||0);
   if (edit.quickFixed) {
-    // Vorschau: wenn „danach im Rhythmus“ -> fest + r, sonst fester Termin
     const fd = parseYMD(edit.fest_termin||null) || parseYMD(edit.done_date);
     if (!fd) return null;
     if (edit.resumeRhythm && (edit.prev_rhythmus_tage||0) > 0) {
@@ -372,11 +366,37 @@ export default function EinsaetzeMH(){
   function openQuickFixed(b: B){
     const e = baseEditFrom(b);
     e.quickFixed = true;
-    e.resumeRhythm = (e.prev_rhythmus_tage||0) > 0;  // Standard: wieder im Rhythmus
-    e.rhythmus_tage = 0;                             // sichtbar: kein Rhythmus
-    // fester Termin default: heute
+    e.resumeRhythm = (e.prev_rhythmus_tage||0) > 0;
+    e.rhythmus_tage = 0;
     e.fest_termin = ymd(new Date());
     setEdit(e); setShowEdit(true);
+  }
+
+  // *** NEU: Karte „Erledigt – kein weiterer Termin“ ***
+  async function completeNoNextById(id: string, doneISO?: string){
+    if (typeof window !== "undefined") {
+      const ok = window.confirm("Als erledigt markieren und KEINEN weiteren Termin anlegen?");
+      if (!ok) return;
+    }
+    setSaving(true); setHint("");
+    try{
+      const payload:any = {
+        id,
+        rhythmus_tage: 0,
+        start_datum: null
+      };
+      if (doneISO) payload.erledigt_am = doneISO;
+
+      await saveWithVerify(payload, null);
+      setShowEdit(false);
+      await load();
+      setHint("Erledigt ✓ (kein weiterer Termin)");
+      setTimeout(()=>setHint(""),2000);
+    }catch(e:any){
+      alert("Aktion fehlgeschlagen: " + (e?.message||String(e)));
+    }finally{
+      setSaving(false);
+    }
   }
 
   async function createNewFixed(){
@@ -384,7 +404,6 @@ export default function EinsaetzeMH(){
       const payload:any = {
         name: "Neuer Kunde",
         rhythmus_tage: 0,
-        // wir speichern fest in start_datum – API nimmt das
         start_datum: null,
         strasse: "", hausnummer: "", plz: "", ort: "",
         projekt_nr: "", kunden_nr: ""
@@ -393,12 +412,11 @@ export default function EinsaetzeMH(){
       const id = j?.item?.id || j?.id;
       await load();
       if (id) {
-        // aus GET öffnen
         try{
           const g = await fetchJsonOk("/api/admin/baustellen/get?id="+encodeURIComponent(id));
           const b = normalize(g.item); 
           const e = baseEditFrom(evalStatus(b, new Date()));
-          e.isNew = true; // Stammdaten-Block sichtbar
+          e.isNew = true;
           setEdit(e); setShowEdit(true);
         }catch{}
       }
@@ -447,23 +465,21 @@ export default function EinsaetzeMH(){
 
       let rOut = rUI;
       let nextPlannedISO: string|null = null;
-      let startOut: string|null = null; // was wir in start_datum speichern
+      let startOut: string|null = null;
 
-      // QUICK FIXED: „Festen neuen Termin eintragen“
       if (edit.quickFixed) {
         const fixed = parseYMD(edit.fest_termin||null) || today;
         if (edit.resumeRhythm && rPrev>0) {
           rOut = rPrev;
-          startOut = ymd(addDays(fixed, rPrev)); // danach wieder im Rhythmus
+          startOut = ymd(addDays(fixed, rPrev));
           nextPlannedISO = startOut;
         } else {
           rOut = 0;
-          startOut = ymd(fixed);                 // fester Termin (wir speichern in start_datum)
+          startOut = ymd(fixed);
           nextPlannedISO = null;
         }
       }
       else {
-        // Standard-Flow
         if (rUI > 0) {
           const done = parseYMD(edit.done_date);
           if (done) nextPlannedISO = ymd(addDays(done, rUI));
@@ -475,7 +491,6 @@ export default function EinsaetzeMH(){
           startOut = nextPlannedISO || (edit.start_datum||null);
         } else {
           rOut = 0;
-          // fester Termin wird in start_datum gespeichert
           startOut = edit.fest_termin || null;
           nextPlannedISO = null;
         }
@@ -484,7 +499,6 @@ export default function EinsaetzeMH(){
       const payload:any = {
         id: edit.id,
 
-        // Stammdaten (nur bei Neuanlage relevant – wir schicken aber unverändert mit)
         name: (edit.name||"").trim(),
         projekt_nr: (edit.projekt_nr||"").trim(),
         kunden_nr: (edit.kunden_nr||"").trim(),
@@ -493,11 +507,9 @@ export default function EinsaetzeMH(){
         plz: (edit.plz||"").trim(),
         ort: (edit.ort||"").trim(),
 
-        // Termine – nur start_datum wird an die DB gesendet (robust)
         rhythmus_tage: rOut,
         start_datum: startOut,
 
-        // Durchführung
         erledigt_am: edit.done_date + "T" + (edit.done_time||"00:00") + ":00",
         mitarbeiter_anzahl: Number(edit.mitarbeiter)||0,
         arbeitszeit_start: edit.start_time||null,
@@ -505,7 +517,6 @@ export default function EinsaetzeMH(){
         pause_min: Number(edit.pause_min)||0,
         entsorgung_m3: (edit.entsorgung_m3==null ? null : edit.entsorgung_m3),
 
-        // Flags/Extras
         codes: edit.codes,
         extra_works: edit.extra_works
       };
@@ -580,9 +591,18 @@ export default function EinsaetzeMH(){
                   <div className="sub">{address(b)}</div>
                   <div className="sub">Termin: <b>{b.next_date?formatDE(b.next_date):"—"}</b></div>
                   <div className="sub">Letzter Termin: {formatDE(b.last_date)}</div>
-                  <div className="sub">
+                  <div className="sub" style={{display:"flex", gap:12}}>
                     <button className="link" onClick={(e)=>{e.stopPropagation(); openQuickFixed(b);}}>
                       Festen neuen Termin eintragen
+                    </button>
+                    {/* NEU: Sofort erledigen → grau */}
+                    <button className="link danger" onClick={(e)=>{
+                      e.stopPropagation();
+                      const today = new Date();
+                      const iso = ymd(today) + "T12:00:00";
+                      completeNoNextById(b.id, iso);
+                    }}>
+                      Erledigt – kein weiterer Termin
                     </button>
                   </div>
                 </div>
@@ -734,9 +754,18 @@ export default function EinsaetzeMH(){
               </div>
             </div>
 
-            <div style={{display:"flex", justifyContent:"flex-end", gap:8, marginTop:12}}>
-              <button className="btn" onClick={()=>setShowEdit(false)}>Abbrechen</button>
-              <button className="btn btn-save" onClick={saveEdit} disabled={saving}>{saving?"Speichert…":"Speichern"}</button>
+            <div style={{display:"flex", justifyContent:"space-between", gap:8, marginTop:12}}>
+              <button className="btn btn-danger" onClick={()=>{
+                const iso = edit!.done_date + "T" + (edit!.done_time||"00:00") + ":00";
+                completeNoNextById(edit!.id, iso);
+              }}>
+                Erledigt – kein weiterer Termin
+              </button>
+
+              <div style={{marginLeft:"auto", display:"flex", gap:8}}>
+                <button className="btn" onClick={()=>setShowEdit(false)}>Abbrechen</button>
+                <button className="btn btn-save" onClick={saveEdit} disabled={saving}>{saving?"Speichert…":"Speichern"}</button>
+              </div>
             </div>
           </div>
         </div>
@@ -763,11 +792,13 @@ export default function EinsaetzeMH(){
             ".preview{background:#f3f4f6;border:1px solid #e5e7eb;border-radius:8px;padding:8px 10px;margin-bottom:10px;font-size:14px}"+
             ".btn{padding:6px 10px;border:1px solid #e5e7eb;border-radius:8px;background:#fff}"+
             ".btn-save{border-color:#10b981;background:#ecfdf5;color:#065f46}"+
+            ".btn-danger{border-color:#ef4444;background:#fee2e2;color:#991b1b}"+
             ".chips{display:flex;flex-wrap:wrap;gap:8px}"+
             ".chip-btn{padding:6px 10px;border:1px solid #e5e7eb;border-radius:9999px;background:#fff;font-weight:600}"+
             ".chip-btn.on{border-color:#2563eb;background:#dbeafe}"+
             ".row-extra{display:grid;grid-template-columns:120px 120px 1fr auto;gap:8px;align-items:center;margin-bottom:8px}"+
             ".link{background:none;border:none;padding:0;margin:0;cursor:pointer;text-decoration:underline;font-size:13px;color:#1d4ed8}"+
+            ".link.danger{color:#b91c1c}"+
             ".banner{background:#eef2ff;border:1px solid #c7d2fe;border-radius:8px;padding:8px 10px;margin-bottom:10px;color:#1e3a8a}"
         }}
       />
