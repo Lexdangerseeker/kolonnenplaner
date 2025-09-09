@@ -1,5 +1,6 @@
 ﻿import type { NextApiRequest, NextApiResponse } from "next";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+
 export default async function handler(req: NextApiRequest,res: NextApiResponse){
   if(req.method!=="GET") return res.status(405).json({ok:false,error:"Method not allowed"});
   try{
@@ -8,11 +9,19 @@ export default async function handler(req: NextApiRequest,res: NextApiResponse){
       id,nachname,name,telefon,email,strasse,hausnummer,plz,ort,
       steuernummer,iban,bic,bank_name,kontoinhaber,
       fuehrerschein_klassen,fuehrerschein_gueltig_bis,geburtsdatum,
-      notfall_name,notfall_tel,notizen,aktiv,pin_hash,pin_updated_at
+      notfall_name,notfall_tel,notiz,aktiv,pin_hash,pin_updated_at,created_at,deleted_at
     `).limit(1);
-    if(id) q=q.eq("id",id); else if(lastname) q=q.ilike("nachname",lastname); else return res.status(400).json({ok:false,error:"id oder lastname erforderlich"});
-    const { data, error } = await q.single(); if(error) throw error;
-    const item:any = { ...data, pin_set:Boolean(data?.pin_hash) }; delete item.pin_hash;
+    if(id) q=q.eq("id",id);
+    else if(lastname) q=q.ilike("nachname",lastname);
+    else return res.status(400).json({ok:false,error:"id oder lastname erforderlich"});
+
+    const { data, error } = await q.single();
+    if(error) throw error;
+
+    const item:any = { ...data, pin_set:Boolean(data?.pin_hash) };
+    delete item.pin_hash; // nie an den Client
     return res.status(200).json({ok:true,item});
-  }catch(e:any){ return res.status(500).json({ok:false,error:e?.message||"Fehler"}) }
+  }catch(e:any){
+    return res.status(500).json({ok:false,error:e?.message||"Fehler"});
+  }
 }
