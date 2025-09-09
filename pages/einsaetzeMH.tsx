@@ -1,4 +1,4 @@
-import AppHeader from "../components/AppHeader";
+﻿import AppHeader from "../components/AppHeader";
 import { useEffect, useMemo, useState } from "react";
 
 type RawB = any;
@@ -13,9 +13,9 @@ type B = {
   plz?: string|null;
   ort?: string|null;
 
-  start_datum?: string|null;
+  start_datum?: string|null;   // UI-Standard (kann aus starttermin stammen)
   rhythmus_tage?: number|null;
-  fest_termin?: string|null;
+  fest_termin?: string|null;   // UI-Feld (für „kein Rhythmus“); DB: wir speichern in start_datum
 
   codes?: string[]|null;
   extra_works?: ExtraWork[]|null;
@@ -31,7 +31,7 @@ type B = {
 type EditState = {
   id: string;
 
-  // DurchfÃ¼hrung / Einsatz
+  // Durchführung / Einsatz
   done_date: string;
   done_time: string;
   mitarbeiter: number;
@@ -40,12 +40,12 @@ type EditState = {
   pause_min: number;
   entsorgung_m3?: number | null;
 
-  // Wiederkehr / Termine
+  // Wiederkehr / Termine (UI)
   rhythmus_tage: number;
-  start_datum?: string;  // nÃ¤chster Termin (bei Rhythmus)
-  fest_termin?: string;  // fixer Termin (ohne Rhythmus)
+  start_datum?: string;   // nächster Termin (bei Rhythmus)
+  fest_termin?: string;   // fester Einzeltermin (bei rhythmus=0)
 
-  // Stammdaten (Ãœberschrift/Adresse etc.)
+  // Stammdaten (nur bei Neuanlage sichtbar)
   name: string;
   projekt_nr: string;
   kunden_nr: string;
@@ -57,6 +57,12 @@ type EditState = {
   // Eigenschaften / Zusatzarbeiten
   codes: string[];
   extra_works: ExtraWork[];
+
+  // UI Flags
+  isNew?: boolean;
+  quickFixed?: boolean;          // Schnellmodus „Festen neuen Termin eintragen“
+  resumeRhythm?: boolean;        // danach wieder im Rhythmus weiter?
+  prev_rhythmus_tage?: number;   // für resumeRhythm
 };
 
 function fetchJsonOk(url: string, init?: RequestInit){
@@ -73,7 +79,6 @@ function fetchJsonOk(url: string, init?: RequestInit){
     return data ?? {};
   });
 }
-
 async function postJSON(url:string, body:any){
   return fetchJsonOk(url, {
     method:"POST",
@@ -113,15 +118,19 @@ function diffDays(a: Date, b: Date): number {
   return Math.floor((B - A) / MS_DAY);
 }
 function formatDE(dt?: Date|null): string {
-  if (!dt) return "â€”";
+  if (!dt) return "—";
   try { return dt.toLocaleDateString("de-DE"); } catch { return ymd(dt); }
 }
 
 // --- Logik ---
 function pickFixedDate(raw: any, rhythmus: number, start_datum: string|null): string|null {
+  // fester Termin kann explizit in der Quelle heißen – oder wir nehmen start_datum, wenn KEIN Rhythmus
   const fixed = raw?.fest_termin ?? raw?.fixed_date ?? raw?.fester_termin ?? null;
-  if (fixed) return fixed;
-  if (!rhythmus && start_datum) return start_datum;
+  if (fixed) return String(fixed);
+  if (!rhythmus) {
+    const start = start_datum ?? raw?.starttermin ?? raw?.start ?? null;
+    if (start) return String(start);
+  }
   return null;
 }
 function readCodes(raw: any): string[] {
@@ -135,8 +144,9 @@ function readExtraWorks(raw: any): ExtraWork[] {
   return [];
 }
 function normalize(raw: RawB): B {
-  const rhythm = (raw.rhythmus_tage===null || raw.rhythmus_tage===undefined) ? null : Number(raw.rhythmus_tage);
-  const start = raw.start_datum ?? null;
+  const rhythmRaw = raw.rhythmus_tage ?? raw.rhythmus ?? null;
+  const rhythm = (rhythmRaw===null || rhythmRaw===undefined) ? null : Number(rhythmRaw);
+  const start = raw.start_datum ?? raw.starttermin ?? raw.start ?? null;
   const b: B = {
     id: String(raw.id),
     name: raw.name ?? null,
@@ -172,9 +182,10 @@ function evalStatus(b: B, now: Date): B {
   const r = (b.rhythmus_tage==null ? 0 : Number(b.rhythmus_tage));
   const hasRhythm = r > 0;
   const start = parseYMD(b.start_datum);
-  const fixed = parseYMD(b.fest_termin);
+  // „Fest“ kann aus explizitem fest_termin kommen – oder (Fallback) aus start_datum, wenn r==0
+  const fixed = parseYMD(b.fest_termin || (r===0 ? b.start_datum || null : null));
 
-  // Starttermin ist geplanter nÃ¤chster Termin (keine Auto-VorwÃ¤rtsrechnung).
+  // Rhythmus-Fall
   if (hasRhythm && start) {
     b.next_date = start;
     b.last_date = addDays(start, -r);
@@ -186,6 +197,7 @@ function evalStatus(b: B, now: Date): B {
     return b;
   }
 
+  // Kein Rhythmus → feste/lose Termine rechts
   b.column = "right";
   if (fixed) {
     b.next_date = fixed;
@@ -222,13 +234,13 @@ function useNowTick(ms: number){
 function statusText(b: B): string {
   if (b.status==="red") {
     const d = b.overdue_days ?? 0;
-    return d>0 ? ("Ã¼berfÃ¤llig seit " + d + " Tagen") : "heute fÃ¤llig";
+    return d>0 ? ("überfällig seit " + d + " Tagen") : "heute fällig";
   }
   if (b.status==="yellow" || b.status==="green" || b.status==="blue" || b.status==="yellow-blue") {
     const d = b.days_until ?? 0;
-    return (d===0) ? "heute fÃ¤llig" : ("in " + d + " Tagen fÃ¤llig");
+    return (d===0) ? "heute fällig" : ("in " + d + " Tagen fällig");
   }
-  if (b.status==="pink") return "heute fÃ¤llig (akut)";
+  if (b.status==="pink") return "heute fällig (akut)";
   if (b.status==="gray") return "wartet (kein Termin)";
   return "";
 }
@@ -239,12 +251,20 @@ function cardClass(b: B, blink: boolean): string {
 }
 function calcNextPreview(edit: EditState): Date|null {
   const r = Number(edit.rhythmus_tage||0);
+  if (edit.quickFixed) {
+    // Vorschau: wenn „danach im Rhythmus“ -> fest + r, sonst fester Termin
+    const fd = parseYMD(edit.fest_termin||null) || parseYMD(edit.done_date);
+    if (!fd) return null;
+    if (edit.resumeRhythm && (edit.prev_rhythmus_tage||0) > 0) {
+      return addDays(fd, Number(edit.prev_rhythmus_tage||0));
+    }
+    return fd;
+  }
   if (r > 0) {
     const done = parseYMD(edit.done_date);
     if (done) return addDays(done, r);
     const start = parseYMD(edit.start_datum||null);
-    const today = startOfDayLocal(new Date());
-    if (start) return addDays(start, r); // simple Vorschau
+    if (start) return addDays(start, r);
     return null;
   } else {
     return parseYMD(edit.fest_termin||null);
@@ -291,13 +311,13 @@ export default function EinsaetzeMH(){
   },[items,q]);
 
   const left = useMemo(()=>{
-    return filtered.filter(b=>b.column==="left" && b.next_date).sort((a,b)=>{
+    return filtered.filter(b=> (b.rhythmus_tage||0) > 0 && b.next_date).sort((a,b)=>{
       return (a.next_date!.getTime() - b.next_date!.getTime()) || (a.name||"").localeCompare(b.name||"");
     });
   },[filtered]);
 
   const right = useMemo(()=>{
-    const arr = filtered.filter(b=>b.column==="right");
+    const arr = filtered.filter(b=> (b.rhythmus_tage||0) === 0);
     return arr.sort((a,b)=>{
       const r1 = rankRight(a), r2 = rankRight(b);
       if (r1 !== r2) return r1 - r2;
@@ -308,13 +328,13 @@ export default function EinsaetzeMH(){
     });
   },[filtered]);
 
-  function openEdit(b: B){
+  function baseEditFrom(b: B): EditState {
     const today = new Date();
     const hh = String(today.getHours()).padStart(2,"0");
     const mm = String(Math.round(today.getMinutes()/15)*15).padStart(2,"0");
     const codes = Array.isArray(b.codes) ? b.codes.slice() : [];
     const extra = Array.isArray(b.extra_works) ? b.extra_works.slice() : [];
-    const deff: EditState = {
+    return {
       id: b.id,
       done_date: ymd(today),
       done_time: hh + ":" + mm,
@@ -326,7 +346,7 @@ export default function EinsaetzeMH(){
 
       rhythmus_tage: (b.rhythmus_tage==null?0:Number(b.rhythmus_tage)),
       start_datum: b.start_datum || "",
-      fest_termin: b.fest_termin || "",
+      fest_termin: (b.rhythmus_tage||0)===0 ? (b.fest_termin || b.start_datum || "") : "",
 
       name: b.name || "",
       projekt_nr: b.projekt_nr || "",
@@ -336,9 +356,27 @@ export default function EinsaetzeMH(){
       plz: b.plz || "",
       ort: b.ort || "",
 
-      codes, extra_works: extra
+      codes, extra_works: extra,
+
+      isNew: false,
+      quickFixed: false,
+      resumeRhythm: false,
+      prev_rhythmus_tage: Number(b.rhythmus_tage||0)
     };
+  }
+
+  function openEdit(b: B){
+    const deff = baseEditFrom(b);
     setEdit(deff); setShowEdit(true);
+  }
+  function openQuickFixed(b: B){
+    const e = baseEditFrom(b);
+    e.quickFixed = true;
+    e.resumeRhythm = (e.prev_rhythmus_tage||0) > 0;  // Standard: wieder im Rhythmus
+    e.rhythmus_tage = 0;                             // sichtbar: kein Rhythmus
+    // fester Termin default: heute
+    e.fest_termin = ymd(new Date());
+    setEdit(e); setShowEdit(true);
   }
 
   async function createNewFixed(){
@@ -346,7 +384,8 @@ export default function EinsaetzeMH(){
       const payload:any = {
         name: "Neuer Kunde",
         rhythmus_tage: 0,
-        fest_termin: "",
+        // wir speichern fest in start_datum – API nimmt das
+        start_datum: null,
         strasse: "", hausnummer: "", plz: "", ort: "",
         projekt_nr: "", kunden_nr: ""
       };
@@ -354,15 +393,14 @@ export default function EinsaetzeMH(){
       const id = j?.item?.id || j?.id;
       await load();
       if (id) {
-        const got = (items.find(x=>x.id===id) || null);
-        if (got) openEdit(got);
-        else {
-          // Nachladen, dann aus GET Ã¶ffnen
-          try{
-            const g = await fetchJsonOk("/api/admin/baustellen/get?id="+encodeURIComponent(id));
-            const b = normalize(g.item); openEdit(evalStatus(b, now));
-          }catch{}
-        }
+        // aus GET öffnen
+        try{
+          const g = await fetchJsonOk("/api/admin/baustellen/get?id="+encodeURIComponent(id));
+          const b = normalize(g.item); 
+          const e = baseEditFrom(evalStatus(b, new Date()));
+          e.isNew = true; // Stammdaten-Block sichtbar
+          setEdit(e); setShowEdit(true);
+        }catch{}
       }
       setHint("Neuer Kunde angelegt");
       setTimeout(()=>setHint(""),2000);
@@ -386,13 +424,13 @@ export default function EinsaetzeMH(){
 
   async function saveWithVerify(payload:any, expectedNext:string|null){
     try { await postJSON("/api/admin/baustellen/update", payload); }
-    catch(e:any){
+    catch {
       try { await postJSON("/api/admin/baustellen/upsert", payload); }
-      catch(e2:any){ throw e; }
+      catch(e2:any){ throw e2; }
     }
     try{
       const g = await fetchJsonOk("/api/admin/baustellen/get?id="+encodeURIComponent(payload.id));
-      const gotStart = (g?.item?.start_datum||null) as string|null;
+      const gotStart = (g?.item?.start_datum ?? g?.item?.starttermin ?? null) as string|null;
       if (expectedNext && expectedNext !== gotStart) {
         await postJSON("/api/admin/baustellen/upsert", { id: payload.id, start_datum: expectedNext });
       }
@@ -403,25 +441,50 @@ export default function EinsaetzeMH(){
     if (!edit) return;
     setSaving(true); setHint("");
     try{
-      const r = Number(edit.rhythmus_tage||0);
-      let nextPlannedISO: string|null = null;
+      const today = parseYMD(edit.done_date) || new Date();
+      const rPrev = Number(edit.prev_rhythmus_tage||0);
+      const rUI   = Number(edit.rhythmus_tage||0);
 
-      if (r > 0) {
-        const done = parseYMD(edit.done_date);
-        if (done) nextPlannedISO = ymd(addDays(done, r));
-        else {
-          const start = parseYMD(edit.start_datum||null);
-          if (start) nextPlannedISO = ymd(addDays(start, r));
-          else nextPlannedISO = null;
+      let rOut = rUI;
+      let nextPlannedISO: string|null = null;
+      let startOut: string|null = null; // was wir in start_datum speichern
+
+      // QUICK FIXED: „Festen neuen Termin eintragen“
+      if (edit.quickFixed) {
+        const fixed = parseYMD(edit.fest_termin||null) || today;
+        if (edit.resumeRhythm && rPrev>0) {
+          rOut = rPrev;
+          startOut = ymd(addDays(fixed, rPrev)); // danach wieder im Rhythmus
+          nextPlannedISO = startOut;
+        } else {
+          rOut = 0;
+          startOut = ymd(fixed);                 // fester Termin (wir speichern in start_datum)
+          nextPlannedISO = null;
         }
-      } else {
-        nextPlannedISO = null;
+      }
+      else {
+        // Standard-Flow
+        if (rUI > 0) {
+          const done = parseYMD(edit.done_date);
+          if (done) nextPlannedISO = ymd(addDays(done, rUI));
+          else {
+            const start = parseYMD(edit.start_datum||null);
+            if (start) nextPlannedISO = ymd(addDays(start, rUI));
+            else nextPlannedISO = null;
+          }
+          startOut = nextPlannedISO || (edit.start_datum||null);
+        } else {
+          rOut = 0;
+          // fester Termin wird in start_datum gespeichert
+          startOut = edit.fest_termin || null;
+          nextPlannedISO = null;
+        }
       }
 
       const payload:any = {
         id: edit.id,
 
-        // Stammdaten
+        // Stammdaten (nur bei Neuanlage relevant – wir schicken aber unverändert mit)
         name: (edit.name||"").trim(),
         projekt_nr: (edit.projekt_nr||"").trim(),
         kunden_nr: (edit.kunden_nr||"").trim(),
@@ -430,12 +493,11 @@ export default function EinsaetzeMH(){
         plz: (edit.plz||"").trim(),
         ort: (edit.ort||"").trim(),
 
-        // Termine
-        rhythmus_tage: r,
-        start_datum: r>0 ? (nextPlannedISO || (edit.start_datum||null)) : null,
-        fest_termin: r===0 ? (edit.fest_termin||null) : null,
+        // Termine – nur start_datum wird an die DB gesendet (robust)
+        rhythmus_tage: rOut,
+        start_datum: startOut,
 
-        // DurchfÃ¼hrung
+        // Durchführung
         erledigt_am: edit.done_date + "T" + (edit.done_time||"00:00") + ":00",
         mitarbeiter_anzahl: Number(edit.mitarbeiter)||0,
         arbeitszeit_start: edit.start_time||null,
@@ -451,7 +513,7 @@ export default function EinsaetzeMH(){
       await saveWithVerify(payload, nextPlannedISO);
       setShowEdit(false);
       await load();
-      setHint("Gespeichert âœ“");
+      setHint("Gespeichert ✓");
       setTimeout(()=>setHint(""),2000);
     }catch(e:any){
       alert("Speichern fehlgeschlagen: " + (e?.message||String(e)));
@@ -464,12 +526,12 @@ export default function EinsaetzeMH(){
 
   return (
     <div style={{padding:"12px 16px 16px"}}>
-      <h1 style={{fontSize:20, fontWeight:700, margin:"4px 0 12px"}}>EinsÃ¤tze MH</h1>
+      <h1 style={{fontSize:20, fontWeight:700, margin:"4px 0 12px"}}>Einsätze MH</h1>
 
       <div style={{display:"flex", gap:8, alignItems:"center", marginBottom:12}}>
-        <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Suche nach Name/Adresseâ€¦"
+        <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Suche nach Name/Adresse…"
                style={{padding:"8px 10px",border:"1px solid #e5e7eb",borderRadius:8,minWidth:280}}/>
-        <button onClick={load} disabled={loading} style={{padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,background:"#fff"}}>{loading?"LÃ¤dtâ€¦":"Server neu laden"}</button>
+        <button onClick={load} disabled={loading} style={{padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,background:"#fff"}}>{loading?"Lädt…":"Server neu laden"}</button>
         <div style={{marginLeft:"auto", display:"flex", gap:8, alignItems:"center"}}>
           <button onClick={createNewFixed} className="btn">Neuer Kunde</button>
           <div style={{color:"#059669"}}>{hint}</div>
@@ -486,12 +548,17 @@ export default function EinsaetzeMH(){
               return (
                 <div key={b.id} className={cardClass(b, blink)} onClick={()=>openEdit(b)} style={{cursor:"pointer"}}>
                   <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:4}}>
-                    <div style={{fontWeight:700}}>{b.name||"â€”"}</div>
+                    <div style={{fontWeight:700}}>{b.name||"—"}</div>
                     <div className="status-text">{statusText(b)}</div>
                   </div>
                   <div className="sub">{address(b)}</div>
-                  <div className="sub">NÃ¤chster Termin: <b>{formatDE(b.next_date)}</b></div>
+                  <div className="sub">Nächster Termin: <b>{formatDE(b.next_date)}</b></div>
                   <div className="sub">Letzter Termin: {formatDE(b.last_date)}</div>
+                  <div className="sub">
+                    <button className="link" onClick={(e)=>{e.stopPropagation(); openQuickFixed(b);}}>
+                      Festen neuen Termin eintragen
+                    </button>
+                  </div>
                 </div>
               );
             })}
@@ -507,12 +574,17 @@ export default function EinsaetzeMH(){
               return (
                 <div key={b.id} className={cardClass(b, blink)} onClick={()=>openEdit(b)} style={{cursor:"pointer"}}>
                   <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:4}}>
-                    <div style={{fontWeight:700}}>{b.name||"â€”"}</div>
+                    <div style={{fontWeight:700}}>{b.name||"—"}</div>
                     <div className="status-text">{statusText(b)}</div>
                   </div>
                   <div className="sub">{address(b)}</div>
-                  <div className="sub">Termin: <b>{b.next_date?formatDE(b.next_date):"â€”"}</b></div>
+                  <div className="sub">Termin: <b>{b.next_date?formatDE(b.next_date):"—"}</b></div>
                   <div className="sub">Letzter Termin: {formatDE(b.last_date)}</div>
+                  <div className="sub">
+                    <button className="link" onClick={(e)=>{e.stopPropagation(); openQuickFixed(b);}}>
+                      Festen neuen Termin eintragen
+                    </button>
+                  </div>
                 </div>
               );
             })}
@@ -524,48 +596,60 @@ export default function EinsaetzeMH(){
       {showEdit && edit && (
         <div className="modal-backdrop" onClick={()=>setShowEdit(false)}>
           <div className="modal" onClick={e=>e.stopPropagation()}>
-
-
             <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:8}}>
               <div style={{fontWeight:700}}>Termin bearbeiten</div>
-              <button onClick={()=>setShowEdit(false)} className="btn">SchlieÃŸen</button>
+              <button onClick={()=>setShowEdit(false)} className="btn">Schließen</button>
             </div>
+
+            {edit.quickFixed && (
+              <div className="banner">
+                Schnellmodus: <b>Festen neuen Termin</b> erfassen
+                <label style={{marginLeft:12, display:"inline-flex", alignItems:"center", gap:6}}>
+                  <input type="checkbox" checked={!!edit.resumeRhythm} onChange={e=>setEdit({...edit!, resumeRhythm: e.target.checked})}/>
+                  danach wieder im Rhythmus weiter{(edit.prev_rhythmus_tage||0)>0 ? ` (${edit.prev_rhythmus_tage} Tage)` : ""}
+                </label>
+              </div>
+            )}
 
             <div className="preview">
-              <b>NÃ¤chster Termin (Vorschau):</b> {formatDE(previewNext)}
+              <b>Nächster Termin (Vorschau):</b> {formatDE(previewNext)}
             </div>
 
-            {/* Stammdaten */}
-            <div style={{fontWeight:600, margin:"6px 0"}}>Stammdaten (Ãœberschrift & Adresse)</div>
-            <div className="grid2">
-              <label>Name (Ãœberschrift)
-                <input type="text" value={edit.name} onChange={e=>setEdit({...edit!, name:e.target.value})}/>
-              </label>
-              <label>Projekt-Nr.
-                <input type="text" value={edit.projekt_nr} onChange={e=>setEdit({...edit!, projekt_nr:e.target.value})}/>
-              </label>
-              <label>Kunden-Nr.
-                <input type="text" value={edit.kunden_nr} onChange={e=>setEdit({...edit!, kunden_nr:e.target.value})}/>
-              </label>
-              <div></div>
-              <label>StraÃŸe
-                <input type="text" value={edit.strasse} onChange={e=>setEdit({...edit!, strasse:e.target.value})}/>
-              </label>
-              <label>Hausnummer
-                <input type="text" value={edit.hausnummer} onChange={e=>setEdit({...edit!, hausnummer:e.target.value})}/>
-              </label>
-              <label>PLZ
-                <input type="text" value={edit.plz} onChange={e=>setEdit({...edit!, plz:e.target.value})}/>
-              </label>
-              <label>Ort
-                <input type="text" value={edit.ort} onChange={e=>setEdit({...edit!, ort:e.target.value})}/>
-              </label>
-            </div>
+            {/* Stammdaten nur bei Neuanlage */}
+            {edit.isNew && (
+              <>
+                <div style={{fontWeight:600, margin:"6px 0"}}>Stammdaten (Überschrift & Adresse)</div>
+                <div className="grid2">
+                  <label>Name (Überschrift)
+                    <input type="text" value={edit.name} onChange={e=>setEdit({...edit!, name:e.target.value})}/>
+                  </label>
+                  <label>Projekt-Nr.
+                    <input type="text" value={edit.projekt_nr} onChange={e=>setEdit({...edit!, projekt_nr:e.target.value})}/>
+                  </label>
+                  <label>Kunden-Nr.
+                    <input type="text" value={edit.kunden_nr} onChange={e=>setEdit({...edit!, kunden_nr:e.target.value})}/>
+                  </label>
+                  <div></div>
+                  <label>Straße
+                    <input type="text" value={edit.strasse} onChange={e=>setEdit({...edit!, strasse:e.target.value})}/>
+                  </label>
+                  <label>Hausnummer
+                    <input type="text" value={edit.hausnummer} onChange={e=>setEdit({...edit!, hausnummer:e.target.value})}/>
+                  </label>
+                  <label>PLZ
+                    <input type="text" value={edit.plz} onChange={e=>setEdit({...edit!, plz:e.target.value})}/>
+                  </label>
+                  <label>Ort
+                    <input type="text" value={edit.ort} onChange={e=>setEdit({...edit!, ort:e.target.value})}/>
+                  </label>
+                </div>
+              </>
+            )}
 
-            {/* DurchfÃ¼hrung / Einsatz */}
-            <div style={{fontWeight:600, margin:"10px 0 6px"}}>DurchfÃ¼hrung</div>
+            {/* Durchführung / Einsatz */}
+            <div style={{fontWeight:600, margin:"10px 0 6px"}}>Durchführung</div>
             <div className="grid2">
-              <label>DurchfÃ¼hrungsdatum
+              <label>Durchführungsdatum
                 <input type="date" value={edit.done_date} onChange={e=>setEdit({...edit!, done_date:e.target.value})}/>
               </label>
               <label>Uhrzeit
@@ -587,18 +671,18 @@ export default function EinsaetzeMH(){
                   <button className="btn" onClick={()=>setEdit({...edit!, pause_min: 0})}>Ohne Pause</button>
                 </div>
               </label>
-              <label>Entsorgung (mÂ³)
+              <label>Entsorgung (m³)
                 <input type="number" min={0} step="0.01" value={(edit.entsorgung_m3==null?"":String(edit.entsorgung_m3))} onChange={e=>{
                   const v = e.target.value; setEdit({...edit!, entsorgung_m3: (v==="" ? null : Number(v))});
                 }}/>
               </label>
             </div>
 
-            {/* Rhythmus / Fester Termin */}
+            {/* Terminlogik */}
             <div style={{fontWeight:600, margin:"10px 0 6px"}}>Terminlogik</div>
             <div className="grid2">
               <label>Rhythmus (Tage)
-                <select value={String(edit.rhythmus_tage)} onChange={e=>setEdit({...edit!, rhythmus_tage: Number(e.target.value)})}>
+                <select value={String(edit.rhythmus_tage)} onChange={e=>setEdit({...edit!, rhythmus_tage: Number(e.target.value)})} disabled={edit.quickFixed && edit.resumeRhythm}>
                   <option value="0">Kein Rhythmus</option>
                   <option value="7">7</option>
                   <option value="14">14</option>
@@ -608,11 +692,11 @@ export default function EinsaetzeMH(){
                 </select>
               </label>
               <label>Eigener Rhythmus
-                <input type="number" min={0} placeholder="eigene Tage" onChange={e=>{ const n = Number(e.target.value||0); if(n>0) setEdit({...edit!, rhythmus_tage:n}); }}/>
+                <input type="number" min={0} placeholder="eigene Tage" onChange={e=>{ const n = Number(e.target.value||0); if(n>0) setEdit({...edit!, rhythmus_tage:n}); }} disabled={edit.quickFixed && edit.resumeRhythm}/>
               </label>
 
-              {edit.rhythmus_tage>0 ? (
-                <label style={{gridColumn:"1 / -1"}}>NÃ¤chster Termin wird gespeichert als (start_datum)
+              { (edit.rhythmus_tage>0 && !(edit.quickFixed && !edit.resumeRhythm)) ? (
+                <label style={{gridColumn:"1 / -1"}}>Nächster Termin wird gespeichert als (start_datum)
                   <input type="date" value={previewNext? ymd(previewNext) : (edit.start_datum||"")} onChange={e=>setEdit({...edit!, start_datum:e.target.value})}/>
                 </label>
               ) : (
@@ -652,7 +736,7 @@ export default function EinsaetzeMH(){
 
             <div style={{display:"flex", justifyContent:"flex-end", gap:8, marginTop:12}}>
               <button className="btn" onClick={()=>setShowEdit(false)}>Abbrechen</button>
-              <button className="btn btn-save" onClick={saveEdit} disabled={saving}>{saving?"Speichertâ€¦":"Speichern"}</button>
+              <button className="btn btn-save" onClick={saveEdit} disabled={saving}>{saving?"Speichert…":"Speichern"}</button>
             </div>
           </div>
         </div>
@@ -682,7 +766,9 @@ export default function EinsaetzeMH(){
             ".chips{display:flex;flex-wrap:wrap;gap:8px}"+
             ".chip-btn{padding:6px 10px;border:1px solid #e5e7eb;border-radius:9999px;background:#fff;font-weight:600}"+
             ".chip-btn.on{border-color:#2563eb;background:#dbeafe}"+
-            ".row-extra{display:grid;grid-template-columns:120px 120px 1fr auto;gap:8px;align-items:center;margin-bottom:8px}"
+            ".row-extra{display:grid;grid-template-columns:120px 120px 1fr auto;gap:8px;align-items:center;margin-bottom:8px}"+
+            ".link{background:none;border:none;padding:0;margin:0;cursor:pointer;text-decoration:underline;font-size:13px;color:#1d4ed8}"+
+            ".banner{background:#eef2ff;border:1px solid #c7d2fe;border-radius:8px;padding:8px 10px;margin-bottom:10px;color:#1e3a8a}"
         }}
       />
     </div>
