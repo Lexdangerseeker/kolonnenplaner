@@ -241,7 +241,7 @@ function statusText(b: B): string {
 }
 function cardClass(b: B, blink: boolean): string {
   const base = "card ";
-  thed const map:any = { green:"card-green", yellow:"card-yellow", red:"card-red", blue:"card-blue", "yellow-blue":"card-yellowblue", pink:"card-pink", gray:"card-gray" };
+  const map:any = { green:"card-green", yellow:"card-yellow", red:"card-red", blue:"card-blue", "yellow-blue":"card-yellowblue", pink:"card-pink", gray:"card-gray" };
   return base + (map[b.status||"gray"]||"card-gray") + (blink?" blink":"");
 }
 function calcNextPreview(edit: EditState): Date|null {
@@ -805,3 +805,4 @@ export default function EinsaetzeMH(){
     </div>
   );
 }
+
