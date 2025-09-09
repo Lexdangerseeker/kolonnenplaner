@@ -1,0 +1,12 @@
+:root { color-scheme: light; }
+* { box-sizing: border-box; }
+html, body, #__next { height: 100%; }
+body {
+  margin: 0;
+  background: #f6f7fb;          /* zartes Grau für Karten-Optik */
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+table { width: 100%; border-collapse: collapse; }
+th, td { font-size: 14px; color: #0f172a; }
+h1, h2, h3 { margin: 0; }

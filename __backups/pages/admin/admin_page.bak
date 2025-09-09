@@ -1,0 +1,21 @@
+﻿import Link from "next/link";
+import Layout from "../../components/Layout";
+
+const B = "px-3 py-2 rounded border hover:bg-black/5";
+
+export default function AdminHome(){
+  return (
+    <Layout title="Admin">
+      <section className="rounded border p-4">
+        <div className="font-semibold mb-2">Verzweigungen</div>
+        <div className="flex flex-wrap gap-2">
+          <Link className={B} href="/admin/stammdaten">Stammdaten</Link>
+          <Link className={B} href="/admin/statistiken">Statistiken</Link>
+          <Link className={B} href="/admin/einsaetzeMH">Einsaetze MH</Link>
+          <Link className={B} href="/admin/einsaetze_fest_preview">Feste Einsaetze</Link>
+          <Link className={B} href="/admin/arbeitszeiten">Arbeitszeiten</Link>
+        </div>
+      </section>
+    </Layout>
+  );
+}

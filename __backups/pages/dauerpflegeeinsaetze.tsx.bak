@@ -1,0 +1,627 @@
+﻿// src/pages/einsaetzeMH.tsx
+import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
+
+/** -------- Helpers -------- */
+function todayISO(): string {
+  // Lokales Datum ohne UTC-Shift
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+function nowHM(): string {
+  const d = new Date();
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+function addDaysISO(iso: string, n: number): string {
+  // Rechne auf lokaler Mitternacht, nicht UTC ("Z")
+  const d = new Date(`${iso}T00:00:00`);
+  d.setDate(d.getDate() + n);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+function daysBetween(aISO: string, bISO: string): number {
+  // Differenz auf Basis lokaler Mitternacht
+  const a = new Date(`${aISO}T00:00:00`).getTime();
+  const b = new Date(`${bISO}T00:00:00`).getTime();
+  return Math.round((b - a) / (24 * 3600 * 1000));
+}
+function fmtDE(iso?: string | null): string {
+  if (!iso) return "-";
+  const [y, m, d] = String(iso).split("-");
+  return `${d}.${m}.${y}`;
+}
+
+/** -------- Types (nur was wir rendern/benötigen) -------- */
+type SessionUser = { nachname: string } | null;
+
+type BaustelleOut = {
+  baustelle_id: string;
+  nummer: number | null;
+  name: string | null;
+  adresse: string | null;
+  plz: string | null;
+  ort: string | null;
+  projekt_nr: string | null;
+  kunden_nr: string | null;
+
+  letzter_durchgang?: string | null; // Prod liefert dieses Feld
+  erster_durchgang?: string | null;  // Fallback
+  rhythmus_tage: number | null;
+  naechster_faellig_am: string | null;
+  ueberfaellig_tage: number;
+
+  durchgaenge_gesamt: number;
+  sum_schnitt_m3_total: number;
+
+  work: { rs: number; hs: number; ss: number; bp: number; grau: number; l: number; wk: number; m: number };
+  arbeitstage: string[]; // erledigte ISO-Tage im Zeitraum (SORTIERT)
+};
+
+/** -------- Unterkomponenten -------- */
+
+/** Kleine Badge */
+function Badge({ label, value }: { label: string; value: number }) {
+  return (
+    <span className="inline-flex items-center gap-1 border rounded px-2 py-0.5 bg-white text-[11px]">
+      <span>{label}</span>
+      <span className="font-mono">{value ?? 0}</span>
+    </span>
+  );
+}
+
+/** Durchgang (Pflegedurchgang) erfassen – eigene Komponente */
+function DurchgangForm({
+  baustelle,
+  onClose,
+  onSaved,
+}: {
+  baustelle: BaustelleOut;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const today = todayISO();
+
+  // Felder
+  const [datum, setDatum] = useState<string>(today);
+  const [von, setVon] = useState<string>("07:30");
+  const [bis, setBis] = useState<string>(nowHM());
+  const [pause, setPause] = useState<number>(0);
+  const [m3, setM3] = useState<string>("0");
+
+  // Häkchen (Work-Flags)
+  const [rs, setRS] = useState<boolean>(false);
+  const [hs, setHS] = useState<boolean>(false);
+  const [ss, setSS] = useState<boolean>(false);
+  const [bp, setBP] = useState<boolean>(false);
+  const [grau, setGrau] = useState<boolean>(false);
+  const [l, setL] = useState<boolean>(false);
+  const [wk, setWK] = useState<boolean>(false);
+  const [m, setM] = useState<boolean>(false);
+
+  // Rhythmus + manueller nächster Termin
+  const [rhythmus, setRhythmus] = useState<number>(baustelle.rhythmus_tage ?? 21);
+  const [nextMan, setNextMan] = useState<string>("");
+
+  const [busy, setBusy] = useState<boolean>(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [msg, setMsg] = useState<string | null>(null);
+
+  const nextAuto = useMemo(() => {
+    if (!datum || !Number.isFinite(rhythmus)) return "";
+    return addDaysISO(datum, rhythmus);
+  }, [datum, rhythmus]);
+
+  function endeJetzt() {
+    setBis(nowHM());
+  }
+
+  async function save(e: React.FormEvent) {
+    e.preventDefault();
+    setErr(null);
+    setMsg(null);
+
+    // Doppelter Tag für dieselbe Baustelle verhindern (Client-Schutz)
+    if (baustelle.arbeitstage?.includes(datum)) {
+      setErr("Für dieses Datum wurde bereits ein Durchgang erfasst (gleiche Baustelle).");
+      return;
+    }
+
+    setBusy(true);
+    try {
+      const r = await fetch("/api/ma/einsatz/erledigt", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          baustelle_id: baustelle.baustelle_id,
+          datum,
+          time_von: von,
+          time_bis: bis,
+          pause_min: Number(pause || 0),
+          schnittgut_m3: parseFloat(m3 || "0"),
+          // Flags
+          work_rs: rs,
+          work_hs: hs,
+          work_ss: ss,
+          work_bp: bp,
+          work_grau: grau,
+          work_l: l,
+          work_wk: wk,
+          work_muell: m,
+          // Rhythmus-Wunsch + optional manuell nächster
+          rhythmus_tage: Number(rhythmus || 0) || null,
+          next_manual: nextMan ? nextMan : null,
+          // Defaults, damit DB-Checks nicht meckern
+          crew_size: 1,
+        }),
+      });
+      const js = await r.json();
+      if (!r.ok) throw new Error(js?.error || "Speichern fehlgeschlagen");
+      setMsg("Durchgang gespeichert.");
+      onSaved();
+      onClose();
+    } catch (e: any) {
+      setErr(e?.message || String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <form onSubmit={save} className="mt-3 grid lg:grid-cols-6 gap-2 p-3 rounded-lg border bg-white">
+      <div className="lg:col-span-6 font-semibold">Pflegedurchgang erfassen</div>
+
+      <label className="grid gap-1">
+        <span className="text-xs">Durchgangs-Datum</span>
+        <input type="date" className="border rounded px-2 py-1" value={datum} onChange={(e) => setDatum(e.target.value)} />
+      </label>
+
+      <label className="grid gap-1">
+        <span className="text-xs">Von</span>
+        <input
+          type="time"
+          className="border rounded px-2 py-1"
+          placeholder="07:30"
+          value={von}
+          onChange={(e) => setVon(e.target.value)}
+        />
+      </label>
+
+      <label className="grid gap-1">
+        <span className="text-xs">Bis</span>
+        <div className="flex gap-2">
+          <input
+            type="time"
+            className="border rounded px-2 py-1 flex-1"
+            placeholder="16:00"
+            value={bis}
+            onChange={(e) => setBis(e.target.value)}
+          />
+          <button type="button" className="border rounded px-2 py-1 text-xs" onClick={endeJetzt}>
+            Ende jetzt
+          </button>
+        </div>
+      </label>
+
+      <label className="grid gap-1">
+        <span className="text-xs">Pause (Min)</span>
+        <input
+          type="number"
+          min={0}
+          className="border rounded px-2 py-1"
+          value={pause}
+          onChange={(e) => setPause(parseInt(e.target.value || "0", 10))}
+        />
+      </label>
+
+      <label className="grid gap-1">
+        <span className="text-xs">Schnittgut (m³)</span>
+        <input
+          type="number"
+          step={0.01}
+          min={0}
+          className="border rounded px-2 py-1"
+          value={m3}
+          onChange={(e) => setM3(e.target.value)}
+        />
+      </label>
+
+      <label className="grid gap-1">
+        <span className="text-xs">Rhythmus</span>
+        <select className="border rounded px-2 py-1" value={String(rhythmus)} onChange={(e) => setRhythmus(parseInt(e.target.value, 10))}>
+          <option value="7">7 Tage</option>
+          <option value="14">14 Tage</option>
+          <option value="21">21 Tage</option>
+          <option value="28">28 Tage</option>
+        </select>
+      </label>
+
+      <div className="lg:col-span-6 grid sm:grid-cols-2 gap-2">
+        <div className="grid gap-1">
+          <span className="text-xs">Nächster Termin (Vorschlag)</span>
+          <input className="border rounded px-2 py-1 bg-black/5" value={nextAuto} readOnly />
+        </div>
+        <label className="grid gap-1">
+          <span className="text-xs">Nächster Termin (optional manuell)</span>
+          <input type="date" className="border rounded px-2 py-1" value={nextMan} onChange={(e) => setNextMan(e.target.value)} />
+        </label>
+      </div>
+
+      {/* Häkchen */}
+      <div className="lg:col-span-6 grid grid-cols-2 sm:grid-cols-4 gap-2 text-[12px]">
+        <label className="inline-flex items-center gap-2">
+          <input type="checkbox" checked={rs} onChange={(e) => setRS(e.target.checked)} /> RS
+        </label>
+        <label className="inline-flex items-center gap-2">
+          <input type="checkbox" checked={hs} onChange={(e) => setHS(e.target.checked)} /> HS
+        </label>
+        <label className="inline-flex items-center gap-2">
+          <input type="checkbox" checked={ss} onChange={(e) => setSS(e.target.checked)} /> SS
+        </label>
+        <label className="inline-flex items-center gap-2">
+          <input type="checkbox" checked={bp} onChange={(e) => setBP(e.target.checked)} /> BP
+        </label>
+        <label className="inline-flex items-center gap-2">
+          <input type="checkbox" checked={grau} onChange={(e) => setGrau(e.target.checked)} /> Grau
+        </label>
+        <label className="inline-flex items-center gap-2">
+          <input type="checkbox" checked={l} onChange={(e) => setL(e.target.checked)} /> L
+        </label>
+        <label className="inline-flex items-center gap-2">
+          <input type="checkbox" checked={wk} onChange={(e) => setWK(e.target.checked)} /> WK
+        </label>
+        <label className="inline-flex items-center gap-2">
+          <input type="checkbox" checked={m} onChange={(e) => setM(e.target.checked)} /> M
+        </label>
+      </div>
+
+      {err && <div className="lg:col-span-6 text-xs text-red-600">{err}</div>}
+      {msg && <div className="lg:col-span-6 text-xs text-green-700">{msg}</div>}
+
+      <div className="lg:col-span-6 flex gap-2">
+        <button className="border rounded px-3 py-1 text-sm" type="submit" disabled={busy}>
+          {busy ? "Speichert…" : "Erledigt speichern"}
+        </button>
+        <button className="border rounded px-3 py-1 text-sm" type="button" onClick={onClose}>
+          Abbrechen
+        </button>
+      </div>
+    </form>
+  );
+}
+
+/** Zusatzarbeiten – eigene Komponente */
+function ExtraForm({
+  baustelleId,
+  onClose,
+  onSaved,
+}: {
+  baustelleId: string;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [datum, setDatum] = useState<string>(todayISO());
+  const [von, setVon] = useState<string>("07:30");
+  const [bis, setBis] = useState<string>(nowHM());
+  const [m3, setM3] = useState<string>("0");
+  const [mat, setMat] = useState<string>("");
+  const [busy, setBusy] = useState<boolean>(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [msg, setMsg] = useState<string | null>(null);
+
+  async function save(e: React.FormEvent) {
+    e.preventDefault();
+    setErr(null);
+    setMsg(null);
+    setBusy(true);
+    try {
+      const r = await fetch("/api/ma/einsatz/extra", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          baustelle_id: baustelleId,
+          datum,
+          time_von: von || null,
+          time_bis: bis || null,
+          qty_m3: parseFloat(m3 || "0"),
+          material_text: mat,
+        }),
+      });
+      const js = await r.json();
+      if (!r.ok) throw new Error(js?.error || "Speichern fehlgeschlagen");
+      setMsg("Zusatzarbeit gespeichert.");
+      onSaved();
+      onClose();
+    } catch (e: any) {
+      setErr(e?.message || String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <form onSubmit={save} className="mt-3 grid lg:grid-cols-6 gap-2 p-3 rounded-lg border bg-white">
+      <div className="lg:col-span-6 font-semibold">Zusätzliche Arbeiten</div>
+
+      <label className="grid gap-1">
+        <span className="text-xs">Datum</span>
+        <input type="date" className="border rounded px-2 py-1" value={datum} onChange={(e) => setDatum(e.target.value)} />
+      </label>
+      <label className="grid gap-1">
+        <span className="text-xs">Von</span>
+        <input
+          type="time"
+          className="border rounded px-2 py-1"
+          value={von}
+          onChange={(e) => setVon(e.target.value)}
+          placeholder="07:30"
+        />
+      </label>
+      <label className="grid gap-1">
+        <span className="text-xs">Bis</span>
+        <input
+          type="time"
+          className="border rounded px-2 py-1"
+          value={bis}
+          onChange={(e) => setBis(e.target.value)}
+          placeholder="16:00"
+        />
+      </label>
+      <label className="grid gap-1">
+        <span className="text-xs">Entsorgung (m³)</span>
+        <input
+          type="number"
+          step={0.01}
+          min={0}
+          className="border rounded px-2 py-1"
+          value={m3}
+          onChange={(e) => setM3(e.target.value)}
+        />
+      </label>
+      <label className="lg:col-span-6 grid gap-1">
+        <span className="text-xs">Benötigte Materialien (Text)</span>
+        <input
+          className="border rounded px-2 py-1"
+          value={mat}
+          onChange={(e) => setMat(e.target.value)}
+          placeholder="z. B. Müllsäcke, Ersatzmesser ..."
+        />
+      </label>
+
+      {err && <div className="lg:col-span-6 text-xs text-red-600">{err}</div>}
+      {msg && <div className="lg:col-span-6 text-xs text-green-700">{msg}</div>}
+
+      <div className="lg:col-span-6 flex gap-2">
+        <button className="border rounded px-3 py-1 text-sm" type="submit" disabled={busy}>
+          {busy ? "Speichert…" : "Speichern"}
+        </button>
+        <button className="border rounded px-3 py-1 text-sm" type="button" onClick={onClose}>
+          Abbrechen
+        </button>
+      </div>
+    </form>
+  );
+}
+
+/** -------- Hauptseite -------- */
+export default function EinsaetzeMH() {
+  const [user, setUser] = useState<SessionUser>(null);
+  const [items, setItems] = useState<BaustelleOut[]>([]);
+  const [err, setErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState<boolean>(false);
+
+  // Sichtbarkeiten je Karte
+  const [showDurchgang, setShowDurchgang] = useState<Record<string, boolean>>({});
+  const [showExtra, setShowExtra] = useState<Record<string, boolean>>({});
+
+  const today = todayISO();
+  const from = useMemo(() => addDaysISO(today, -180), [today]);
+  const to = today;
+
+  async function fetchSession() {
+    try {
+      const r = await fetch("/api/ma/session", { cache: "no-store" });
+      if (r.ok) {
+        const js = await r.json();
+        setUser(js?.user || null);
+      } else {
+        setUser(null);
+      }
+    } catch {
+      setUser(null);
+    }
+  }
+
+  async function load() {
+    setErr(null);
+    setBusy(true);
+    try {
+      // Cache-Buster + no-store
+      const u = new URLSearchParams({ from, to, _t: String(Date.now()) });
+      const r = await fetch(`/api/admin/statistik/baustellen?${u.toString()}`, { cache: "no-store" });
+      const js = await r.json();
+      if (!r.ok) throw new Error(js?.error || "Laden fehlgeschlagen.");
+
+      // Arbeitstage sortieren (älteste -> neueste)
+      const itemsArr: BaustelleOut[] = (js.items || []).map((it: any) => ({
+        ...it,
+        arbeitstage: Array.isArray(it.arbeitstage) ? [...it.arbeitstage].sort() : [],
+      }));
+
+      setItems(itemsArr);
+    } catch (e: any) {
+      setErr(e?.message || String(e));
+      setItems([]);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  useEffect(() => {
+    fetchSession();
+    const t = setTimeout(() => load(), 100);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Sortierung: NÄCHSTER TERMIN (aufsteigend). Null-Werte ans Ende.
+  const sorted = useMemo(() => {
+    const arr = [...items];
+    arr.sort((a, b) => {
+      const na = a.naechster_faellig_am || "9999-12-31";
+      const nb = b.naechster_faellig_am || "9999-12-31";
+      return na.localeCompare(nb);
+    });
+    return arr;
+  }, [items]);
+
+  function colorFor(it: BaustelleOut) {
+    if (it.ueberfaellig_tage > 0) return "border-red-500 bg-red-50";
+    const due = it.naechster_faellig_am;
+    if (due) {
+      const days = daysBetween(today, due);
+      if (days <= 4) return "border-yellow-500 bg-yellow-50";
+    }
+    return "border-green-500 bg-green-50";
+  }
+
+  return (
+    <main className="p-6 max-w-6xl mx-auto space-y-4">
+      <header className="flex items-center justify-between">
+        <h1 className="text-2xl font-bold">Einsätze (MA)</h1>
+        <nav className="text-sm flex items-center gap-3">
+          {user ? (
+            <>
+              <span className="opacity-70">
+                Angemeldet: <strong>{user.nachname}</strong>
+              </span>
+              <Link className="underline" href="/arbeitszeiten">
+                → Arbeitstag
+              </Link>
+            </>
+          ) : (
+            <Link className="underline" href="/arbeitszeiten">
+              Anmelden (Arbeitstag)
+            </Link>
+          )}
+          <Link className="underline" href="/admin">
+            Admin
+          </Link>
+        </nav>
+      </header>
+
+      {err && <div className="text-sm p-2 rounded border bg-red-50">{err}</div>}
+
+      <section className="rounded-xl border p-4">
+        <div className="mb-3 flex items-center gap-2">
+          <button className="border rounded px-3 py-1 text-sm" onClick={load} disabled={busy}>
+            {busy ? "Lädt…" : "Aktualisieren"}
+          </button>
+          <div className="text-xs opacity-70">
+            Zeitraum: {fmtDE(from)} – {fmtDE(to)}
+          </div>
+        </div>
+
+        {!sorted.length ? (
+          <div className="text-sm opacity-70">Keine aktiven Baustellen gefunden.</div>
+        ) : (
+          <ul className="grid gap-3">
+            {sorted.map((it) => {
+              // robuster „letzter Durchgang“
+              const dates = it.arbeitstage?.length ? it.arbeitstage : it.erster_durchgang ? [it.erster_durchgang] : [];
+              const lastFallback = dates.length ? dates[dates.length - 1] : null;
+              const last = it.letzter_durchgang ?? lastFallback;
+
+              const wrapCls = `rounded-lg border-2 ${colorFor(it)} p-3`;
+              const openDurchgang = !!showDurchgang[it.baustelle_id];
+              const openExtra = !!showExtra[it.baustelle_id];
+
+              return (
+                <li key={it.baustelle_id} className={wrapCls}>
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="font-medium truncate">
+                        {it.nummer != null ? `${it.nummer} · ` : ""}
+                        {it.name || "-"}
+                      </div>
+                      <div className="text-xs opacity-80 truncate">
+                        {it.adresse ? `${it.adresse}, ` : ""}
+                        {it.plz || ""} {it.ort || ""}
+                      </div>
+
+                      <div className="text-xs mt-1">
+                        <span className="mr-3">
+                          Letzter Durchgang: <strong>{fmtDE(last)}</strong>
+                        </span>
+                        <span className="mr-3">
+                          Rhythmus: <strong>{it.rhythmus_tage ?? 21} Tage</strong>
+                        </span>
+                        <span className="mr-3">
+                          Nächster: <strong>{fmtDE(it.naechster_faellig_am)}</strong>
+                        </span>
+                        {it.ueberfaellig_tage > 0 ? (
+                          <span className="text-red-700 font-semibold">Überfällig: {it.ueberfaellig_tage} Tage</span>
+                        ) : (
+                          <span className="text-green-700">im Rhythmus</span>
+                        )}
+                      </div>
+
+                      <div className="mt-2 flex flex-wrap gap-2 text-[11px]">
+                        <Badge label="RS" value={it.work.rs} />
+                        <Badge label="HS" value={it.work.hs} />
+                        <Badge label="SS" value={it.work.ss} />
+                        <Badge label="BP" value={it.work.bp} />
+                        <Badge label="Grau" value={it.work.grau} />
+                        <Badge label="L" value={it.work.l} />
+                        <Badge label="WK" value={it.work.wk} />
+                        <Badge label="M" value={it.work.m} />
+                        <span className="opacity-60">· m³ gesamt: {Number(it.sum_schnitt_m3_total || 0).toFixed(2)}</span>
+                      </div>
+                    </div>
+
+                    <div className="flex flex-col gap-2 shrink-0">
+                      <button
+                        className="border rounded px-2 py-1 text-xs"
+                        onClick={() => setShowDurchgang((p) => ({ ...p, [it.baustelle_id]: !openDurchgang }))}
+                        title="Pflegedurchgang erfassen"
+                      >
+                        {openDurchgang ? "Durchgang schließen" : "Durchgang erfassen"}
+                      </button>
+                      <button
+                        className="border rounded px-2 py-1 text-xs"
+                        onClick={() => setShowExtra((p) => ({ ...p, [it.baustelle_id]: !openExtra }))}
+                        title="Zusätzliche Arbeiten erfassen"
+                      >
+                        {openExtra ? "Extras schließen" : "Zusätzliche Arbeiten"}
+                      </button>
+                    </div>
+                  </div>
+
+                  {openDurchgang && (
+                    <DurchgangForm
+                      baustelle={it}
+                      onClose={() => setShowDurchgang((p) => ({ ...p, [it.baustelle_id]: false }))}
+                      onSaved={load}
+                    />
+                  )}
+
+                  {openExtra && (
+                    <ExtraForm
+                      baustelleId={it.baustelle_id}
+                      onClose={() => setShowExtra((p) => ({ ...p, [it.baustelle_id]: false }))}
+                      onSaved={load}
+                    />
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </section>
+    </main>
+  );
+}

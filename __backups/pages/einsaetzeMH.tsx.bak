@@ -1,0 +1,142 @@
+﻿import React, { useEffect, useState } from "react";
+
+// --- Admin-Back-Overlay (nur Admin sichtbar) ---
+function AdminBackOverlay() {
+  const [show, setShow] = useState(false);
+  useEffect(() => {
+    const hasCookie = typeof document !== "undefined" && document.cookie.split(";").some(c => c.trim().startsWith("admin_mode=1"));
+    const hostOk = typeof window !== "undefined" && /(^(localhost|127\.0\.0\.1)$)|(^192\.168\.)/.test(window.location.hostname);
+    const onAdmin = typeof window !== "undefined" && window.location.pathname.startsWith("/admin");
+    setShow(!onAdmin && (hasCookie || hostOk));
+  }, []);
+  if (!show) return null;
+  return (
+    <a href="/admin" className="fixed left-4 bottom-4 z-50 bg-black/70 text-white px-3 py-2 rounded shadow hover:bg-black">
+      ← Zurück zur Admin-Seite
+    </a>
+  );
+}
+
+// Hilfsfunktionen für Datum (Berliner Zeitmodell)
+function atMidnight(d: Date): Date {
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate());
+}
+
+// Akzeptiert yyyy-MM-dd, dd-MM-yyyy, dd.MM.yyyy
+function deToDate(str: string | null | undefined): Date | null {
+  if (!str) return null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(str)) { const [y,m,d]=str.split("-").map(x=>parseInt(x,10)); return new Date(y,m-1,d); }
+  if (/^\d{2}-\d{2}-\d{4}$/.test(str)) { const [d,m,y]=str.split("-").map(x=>parseInt(x,10)); return new Date(y,m-1,d); }
+  if (/^\d{2}\.\d{2}\.\d{4}$/.test(str)) { const [d,m,y]=str.split(".").map(x=>parseInt(x,10)); return new Date(y,m-1,d); }
+  return null;
+}
+function dateToDe(d: Date | null): string {
+  if (!d) return ""; const day=String(d.getDate()).padStart(2,"0"); const month=String(d.getMonth()+1).padStart(2,"0"); const year=d.getFullYear(); return `${day}.${month}.${year}`;
+}
+function dateToIso(d: Date | null): string | null {
+  if (!d) return null; const day=String(d.getDate()).padStart(2,"0"); const month=String(d.getMonth()+1).padStart(2,"0"); const year=d.getFullYear(); return `${year}-${month}-${day}`;
+}
+function diffDays(a: Date, b: Date): number {
+  const ms = atMidnight(a).getTime() - atMidnight(b).getTime(); return Math.round(ms / (1000*60*60*24));
+}
+
+// Typen
+type Einsatz = { id: string; name: string; rhythmus_tage: number | null; start_date: string | null; fixed_date: string | null; };
+type Derived = { next_date: Date | null; days_until: number | null; statusColor: string; kind: "rhythmus" | "fest" | "ignoriert"; };
+
+export default function EinsaetzeMH() {
+  const [items, setItems] = useState<(Einsatz & { _derived: Derived })[]>([]);
+  const [now, setNow] = useState(new Date());
+  const [editId, setEditId] = useState<string | null>(null);
+  const [form, setForm] = useState<{ rhythmus: string; start: string; fest: string }>({ rhythmus: "0", start: "", fest: "" });
+
+  useEffect(() => { const t=setInterval(()=>setNow(new Date()),60000); return ()=>clearInterval(t); }, []);
+
+  function loadData() {
+    fetch("/api/ma/einsaetzeMH/list")
+      .then((r)=>r.json())
+      .then((data)=>{
+        const today = atMidnight(new Date());
+        const mapped = data.items.map((it: Einsatz)=>{
+          const start=deToDate(it.start_date); const fixed=deToDate(it.fixed_date); const rythm=it.rhythmus_tage?Number(it.rhythmus_tage):0;
+          let next:Date|null=null, days:number|null=null, kind:Derived["kind"]="ignoriert"; let color="gray";
+          if (rythm>0 && start){
+            if (atMidnight(start)<=today){ next=new Date(start); while(next<=today){ next.setDate(next.getDate()+rythm);} } else { next=start; }
+            days=diffDays(next,today); kind="rhythmus"; color=(days<=0)?"red":(days<=4)?"yellow":"green";
+          } else if (fixed){
+            next=fixed; days=diffDays(next,today); kind="fest";
+            color=(days<0)?"red":(days===0)?"pink":(days<=4)?"yellow-blue":"blue";
+          } else { color="gray"; kind="ignoriert"; }
+          return { ...it, _derived:{ next_date:next, days_until:days, statusColor:color, kind } };
+        });
+        setItems(mapped);
+      });
+  }
+  useEffect(()=>{ loadData(); },[]);
+
+  async function saveStammdaten(id: string) {
+    const body = { id, rhythmus_tage:Number(form.rhythmus), start_date: form.start ? dateToIso(deToDate(form.start)) : null, fixed_date: form.fest ? dateToIso(deToDate(form.fest)) : null };
+    await fetch("/api/admin/baustellen/update",{ method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify(body) });
+    setEditId(null); loadData();
+  }
+
+  function renderEditor(item: Einsatz){
+    return (
+      <div className="mt-2 p-2 border rounded bg-white">
+        <label className="block text-sm">Rhythmus (Tage)</label>
+        <select className="border p-1 mb-2 w-full" value={form.rhythmus} onChange={(e)=>setForm({ ...form, rhythmus:e.target.value })}>
+          <option value="0">0 (kein Rhythmus)</option><option value="7">7</option><option value="14">14</option><option value="21">21</option><option value="28">28</option><option value="365">365</option>
+          <option value={form.rhythmus}>Custom: {form.rhythmus}</option>
+        </select>
+        <label className="block text-sm">Starttermin (dd.MM.yyyy)</label>
+        <input type="text" className="border p-1 mb-2 w-full" value={form.start} onChange={(e)=>setForm({ ...form, start:e.target.value })}/>
+        <label className="block text-sm">Fester Termin (dd.MM.yyyy)</label>
+        <input type="text" className="border p-1 mb-2 w-full" value={form.fest} onChange={(e)=>setForm({ ...form, fest:e.target.value })}/>
+        <button onClick={()=>saveStammdaten(item.id)} className="bg-blue-600 text-white px-3 py-1 rounded mr-2">Speichern</button>
+        <button onClick={()=>setEditId(null)} className="bg-gray-400 text-white px-3 py-1 rounded">Abbrechen</button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="p-4 grid grid-cols-2 gap-6">
+      <AdminBackOverlay />
+
+      {/* Rhythmus-Spalte */}
+      <div>
+        <h2 className="text-xl font-bold mb-2">Pflege (Rhythmus)</h2>
+        {items.filter(i=>i._derived.kind==="rhythmus").map(i=>{
+          const c=i._derived.statusColor;
+          return (
+            <div key={i.id} className={`p-4 mb-3 border-2 rounded-lg bg-${c}-50`}>
+              <div className="font-bold">{i.name}</div>
+              <div>Nächster Durchgang: {dateToDe(i._derived.next_date)}</div>
+              <div>{i._derived.days_until!==null?`Noch ${i._derived.days_until} Tage`:"Kein Termin berechnet"}</div>
+              <button onClick={()=>{ setEditId(i.id); setForm({ rhythmus:String(i.rhythmus_tage ?? 0), start:dateToDe(deToDate(i.start_date)), fest:dateToDe(deToDate(i.fixed_date)) }); }} className="mt-2 bg-yellow-500 text-white px-3 py-1 rounded">Stammdaten bearbeiten</button>
+              {editId===i.id && renderEditor(i)}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Feste Termine */}
+      <div>
+        <h2 className="text-xl font-bold mb-2">Feste Termine</h2>
+        {items.filter(i=>i._derived.kind==="fest" || i._derived.kind==="ignoriert").map(i=>{
+          const c=i._derived.statusColor;
+          const isBlink = c==="pink" && i._derived.days_until===0 && (new Date()).getHours()>=10;
+          return (
+            <div key={i.id} className={`p-4 mb-3 border-2 rounded-lg bg-${c}-50 ${isBlink?"animate-pulse":""}`}>
+              <div className="font-bold">{i.name}</div>
+              <div>Fester Termin: {dateToDe(i._derived.next_date)}</div>
+              <div>{i._derived.days_until!==null?`Noch ${i._derived.days_until} Tage`:"Kein Termin berechnet"}</div>
+              {isBlink && <div className="mt-2 text-red-700 font-bold">‼ In Bearbeitung? Sonst anrufen!</div>}
+              <button onClick={()=>{ setEditId(i.id); setForm({ rhythmus:String(i.rhythmus_tage ?? 0), start:dateToDe(deToDate(i.start_date)), fest:dateToDe(deToDate(i.fixed_date)) }); }} className="mt-2 bg-yellow-500 text-white px-3 py-1 rounded">Stammdaten bearbeiten</button>
+              {editId===i.id && renderEditor(i)}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}

@@ -1,0 +1,9 @@
+﻿datum;time_von;time_bis;pause_min;hours;art;fahrer;note
+01-09-2025;07:30;16:00;30;8;arbeit;false;
+02-09-2025;07:30;16:00;30;8;arbeit;false;
+03-09-2025;07:30;16:00;30;8;arbeit;false;
+04-09-2025;07:30;16:00;30;8;arbeit;false;
+05-09-2025;07:30;16:00;30;8;arbeit;false;
+06-09-2025;07:30;16:00;30;8;arbeit;false;
+07-09-2025;08:00;12:00;30;3.5;Einsatz;;nur Nachname
+07-09-2025;13:00;16:00;15;2.75;Einsatz;;nur Nachname (w)

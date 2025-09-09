@@ -1,0 +1,47 @@
+﻿ param($m) $m.Value + "`n" + $typeAlias + "`n" 
+function toDate(iso:string){ return new Date(iso.slice(0,10)+"T00:00:00Z"); }
+function toIso(d:Date){ return d.toISOString().slice(0,10); }
+const DAY = 24*60*60*1000;
+
+function nextOccurrence(startIso?:string|null, rhythmus?:number|null, refIso?:string){
+  if (!startIso) return { next_date:null, days_until:null };
+  const start = toDate(startIso);
+  const ref   = refIso ? toDate(refIso) : toDate(new Date().toISOString().slice(0,10));
+
+  const r = (rhythmus==null ? 0 : Number(rhythmus));
+  if (r<=0){
+    // fester Termin: nur wenn Start >= heute
+    if (startIso >= toIso(ref)) {
+      const days = Math.round((start.getTime()-ref.getTime())/DAY);
+      return { next_date: toIso(start), days_until: days };
+    }
+    return { next_date:null, days_until:null };
+  }
+
+  // r > 0: Periodisch
+  if (toIso(start) >= toIso(ref)){
+    const days = Math.round((start.getTime()-ref.getTime())/DAY);
+    return { next_date: toIso(start), days_until: days };
+  }
+
+  const diffDays = Math.floor((toDate(toIso(ref)).getTime() - start.getTime())/DAY); // ganze Tage
+  const steps = Math.floor(diffDays / r) + 1; // erste Periode >= heute
+  const next = new Date(start.getTime() + steps * r * DAY);
+  const days = Math.round((next.getTime() - toDate(toIso(ref)).getTime())/DAY);
+  return { next_date: toIso(next), days_until: days };
+}
+
+export default async function handler(req: NextApiRequest, res: NextApiResponse){
+  const id = (req.query.id||"").toString().trim();
+  if (!id) return res.status(400).json({ ok:false, error:"id required" });
+
+  const sb = supabaseAdmin();
+  const sel = "id,name,start_datum,rhythmus_tage,aktiv,archiviert_am";
+  let r = await sb.from("baustelle").select(sel).eq("id", id).limit(1).single();
+
+  if (r.error) return res.status(r.status===406?404:500).json({ ok:false, error:r.error.message });
+  const b = (r.data ?? {}) as BaustelleMinimal;
+  const calc = nextOccurrence(b.start_datum ?? null, b.rhythmus_tage ?? null);
+  return res.json({ ok:true, item:{ ...b, ...calc } });
+}
+

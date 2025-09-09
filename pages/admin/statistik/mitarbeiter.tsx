@@ -1,0 +1,119 @@
+﻿import React, { useEffect, useMemo, useState } from "react";
+
+// --- Admin-Back-Overlay (nur Admin sichtbar) ---
+function AdminBackOverlay() {
+  const [show, setShow] = useState(false);
+  useEffect(() => {
+    const hasCookie = typeof document !== "undefined" && document.cookie.split(";").some(c => c.trim().startsWith("admin_mode=1"));
+    const hostOk = typeof window !== "undefined" && /(^(localhost|127\.0\.0\.1)$)|(^192\.168\.)/.test(window.location.hostname);
+    const onAdmin = typeof window !== "undefined" && window.location.pathname.startsWith("/admin");
+    setShow(!onAdmin && (hasCookie || hostOk));
+  }, []);
+  if (!show) return null;
+  return (
+    <a href="/admin" className="fixed left-4 bottom-4 z-50 bg-black/70 text-white px-3 py-2 rounded shadow hover:bg-black">
+      ← Zurück zur Admin-Seite
+    </a>
+  );
+}
+
+
+type Row = {
+  id: string;
+  name: string;
+  soll?: number;
+  ist?: number;
+  delta?: number;
+  einsaetze?: number;
+};
+
+export default function StatistikMitarbeiter() {
+  const [month, setMonth] = useState(() => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+  });
+  const [rows, setRows] = useState<Row[]>([]);
+  const [err, setErr] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const query = useMemo(() => new URLSearchParams({ month }).toString(), [month]);
+
+  useEffect(() => {
+    setLoading(true);
+    setErr(null);
+    fetch("/api/admin/statistik/mitarbeiter?" + query)
+      .then((r) => r.json())
+      .then((data) => {
+        if (!data || data.ok === false) {
+          setErr(data?.error || "Fehler in API");
+          setRows([]);
+        } else {
+          setRows(data.items || []);
+        }
+      })
+      .catch((e) => setErr(String(e)))
+      .finally(() => setLoading(false));
+  }, [query]);
+
+  const sumSoll = rows.reduce((a, r) => a + (r.soll || 0), 0);
+  const sumIst = rows.reduce((a, r) => a + (r.ist || 0), 0);
+  const sumDelta = sumIst - sumSoll;
+
+  return (
+    <div className="p-4 space-y-4">
+      <h1 className="text-2xl font-bold">Statistik – Mitarbeiter</h1>
+
+      <div className="flex gap-4 items-end">
+        <div>
+          <label className="block text-sm">Monat</label>
+          <input
+            type="month"
+            value={month}
+            onChange={(e) => setMonth(e.target.value)}
+            className="border rounded px-2 py-1"
+          />
+        </div>
+      </div>
+
+      {loading && <div>Lade Daten…</div>}
+      {err && <div className="text-red-600">{err}</div>}
+
+      <div className="p-3 border rounded bg-gray-50 flex gap-8">
+        <div>Sollstunden: {sumSoll.toFixed(2)}</div>
+        <div>Iststunden: {sumIst.toFixed(2)}</div>
+        <div>Delta: {sumDelta.toFixed(2)}</div>
+      </div>
+
+      <table className="min-w-full border text-sm">
+        <thead className="bg-gray-100">
+          <tr>
+            <th className="p-2 text-left">Mitarbeiter</th>
+            <th className="p-2 text-right">Soll</th>
+            <th className="p-2 text-right">Ist</th>
+            <th className="p-2 text-right">Delta</th>
+            <th className="p-2 text-right">Einsätze</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => (
+            <tr key={r.id} className="border-t">
+              <td className="p-2">{r.name}</td>
+              <td className="p-2 text-right">{r.soll?.toFixed(2) ?? ""}</td>
+              <td className="p-2 text-right">{r.ist?.toFixed(2) ?? ""}</td>
+              <td className="p-2 text-right">{r.delta?.toFixed(2) ?? ""}</td>
+              <td className="p-2 text-right">{r.einsaetze ?? ""}</td>
+            </tr>
+          ))}
+          {rows.length === 0 && !loading && (
+            <tr>
+              <td colSpan={5} className="p-2 text-gray-500">
+                Keine Daten
+              </td>
+            </tr>
+          )}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+

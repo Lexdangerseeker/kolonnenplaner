@@ -1,0 +1,95 @@
+﻿import React, { useEffect, useState } from "react";
+import Link from "next/link";
+
+type LinkItem = { title: string; href: string; };
+
+const ADMIN: LinkItem[] = [
+  { title: "Admin – Übersicht", href: "/admin" },
+  { title: "Admin – Arbeitszeiten", href: "/admin/arbeitszeiten" },
+  { title: "Admin – Stammdaten", href: "/admin/stammdaten" },
+  { title: "Admin – Feste Einsätze (Preview)", href: "/admin/einsaetze_fest_preview" },
+  { title: "Admin – Statistiken (Übersicht)", href: "/admin/statistiken" },
+  { title: "Admin – Statistik: Baustellen", href: "/admin/statistik/baustellen" },
+  { title: "Admin – Statistik: Mitarbeiter", href: "/admin/statistik/mitarbeiter" },
+  { title: "Admin – Statistik: Extras", href: "/admin/statistik/extras" },
+];
+
+const PUBLIC: LinkItem[] = [
+  { title: "Dauerpflegeeinsätze (MA)", href: "/dauerpflegeeinsaetze" },
+  { title: "Einsätze – Rhythmus/Fest (MA)", href: "/einsaetzeMH" },
+  { title: "Feste Einsätze (Preview)", href: "/einsaetze_fest_preview" },
+  { title: "Arbeitszeiten (MA)", href: "/arbeitszeiten" },
+  { title: "Baustellen (Liste)", href: "/baustellen" },
+  { title: "Stammdaten (gesamt)", href: "/stammdaten" },
+  { title: "Stammdaten – Baustellen", href: "/stammdaten/baustellen" },
+  { title: "Stammdaten – Next-Demo", href: "/stammdaten/baustellen_next_demo" },
+  { title: "MA Login", href: "/ma/login" },
+  { title: "MA Logout", href: "/ma/logout" },
+];
+
+function AdminModeBadge() {
+  const [isAdmin, setIsAdmin] = useState(false);
+  useEffect(() => {
+    const hasCookie = typeof document !== "undefined" && document.cookie.split(";").some(c => c.trim().startsWith("admin_mode=1"));
+    const hostOk = typeof window !== "undefined" && /(^(localhost|127\.0\.0\.1)$)|(^192\.168\.)/.test(window.location.hostname);
+    setIsAdmin(hasCookie || hostOk);
+  }, []);
+  return (
+    <span className={"inline-block text-xs px-2 py-1 rounded " + (isAdmin ? "bg-green-600 text-white" : "bg-gray-300 text-gray-800")}>
+      Admin-Modus: {isAdmin ? "AKTIV" : "aus"}
+    </span>
+  );
+}
+
+export default function AdminHub() {
+  const [_, force] = useState(0);
+
+  function setAdminMode(on: boolean) {
+    if (typeof document === "undefined") return;
+    if (on) {
+      document.cookie = "admin_mode=1; Path=/; SameSite=Lax; Max-Age=2592000"; // 30 Tage
+    } else {
+      document.cookie = "admin_mode=; Path=/; SameSite=Lax; Max-Age=0";
+    }
+    force(x => x + 1);
+  }
+
+  return (
+    <div className="p-6 space-y-6">
+      <div className="flex items-center justify-between gap-4">
+        <h1 className="text-2xl font-bold">Admin – Schnellzugriff</h1>
+        <div className="flex items-center gap-3">
+          <AdminModeBadge />
+          <button className="bg-blue-600 text-white px-3 py-1 rounded" onClick={() => setAdminMode(true)}>Admin-Modus aktivieren</button>
+          <button className="bg-gray-500 text-white px-3 py-1 rounded" onClick={() => setAdminMode(false)}>Beenden</button>
+        </div>
+      </div>
+
+      <section>
+        <h2 className="text-lg font-semibold mb-2">Admin-Bereich</h2>
+        <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
+          {ADMIN.map((l) => (
+            <Link key={l.href} href={l.href} className="block border rounded-lg p-3 hover:shadow bg-white">
+              {l.title}
+            </Link>
+          ))}
+        </div>
+      </section>
+
+      <section>
+        <h2 className="text-lg font-semibold mb-2">Öffentliche / MA-Seiten</h2>
+        <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
+          {PUBLIC.map((l) => (
+            <Link key={l.href} href={l.href} className="block border rounded-lg p-3 hover:shadow bg-white">
+              {l.title}
+            </Link>
+          ))}
+        </div>
+      </section>
+
+      <div className="text-xs text-gray-500">
+        Hinweis: Der Admin-Back-Button erscheint auf anderen Seiten nur, wenn der Admin-Modus aktiv ist oder du lokal arbeitest.
+      </div>
+    </div>
+  );
+}

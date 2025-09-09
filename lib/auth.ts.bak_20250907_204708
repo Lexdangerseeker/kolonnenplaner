@@ -1,0 +1,74 @@
+﻿import type { NextApiRequest, NextApiResponse } from "next";
+
+type SessionPayload = {
+  role: "ma" | "admin";
+  lastname?: string;
+  uid?: string;     // <— NEU: wird mitpersistiert
+  ts?: number;
+};
+
+const COOKIE_NAME = process.env.MA_PRESENCE_COOKIE || "ma_sess";
+const COOKIE_SECURE = String(process.env.MA_COOKIE_SECURE||"false")==="true";
+
+function serializeCookie(name:string, value:string, opts?:{maxAge?:number; httpOnly?:boolean; sameSite?:"Lax"|"Strict"|"None"; secure?:boolean; path?:string;}){
+  const parts = [`${name}=${value}`];
+  parts.push(`Path=${opts?.path ?? "/"}`);
+  if (opts?.httpOnly !== false) parts.push("HttpOnly");
+  parts.push(`SameSite=${opts?.sameSite ?? "Lax"}`);
+  if (opts?.secure ?? COOKIE_SECURE) parts.push("Secure");
+  if (opts?.maxAge != null) parts.push(`Max-Age=${opts.maxAge}`);
+  return parts.join("; ");
+}
+
+export function setSessionCookie(res: NextApiResponse, sess: SessionPayload){
+  const json = JSON.stringify(sess || {});
+  const val  = encodeURIComponent(Buffer.from(json, "utf8").toString("base64"));
+  res.setHeader("Set-Cookie", serializeCookie(COOKIE_NAME, val, { maxAge: 60*60*24*30, httpOnly:true }));
+}
+
+export function clearSessionCookie(res: NextApiResponse){
+  res.setHeader("Set-Cookie", serializeCookie(COOKIE_NAME, "", { maxAge: 0, httpOnly:true }));
+}
+
+export function readSessionFromReq(req: NextApiRequest): SessionPayload | null {
+  const raw = req.headers.cookie || "";
+  const m = raw.split(";").map(s=>s.trim()).find(s=>s.startsWith(COOKIE_NAME+"="));
+  if (!m) return null;
+  const v = decodeURIComponent(m.slice(COOKIE_NAME.length+1));
+  try{
+    const obj = JSON.parse(Buffer.from(v, "base64").toString("utf8")) || {};
+    // Sanity: nur erwartete Keys durchlassen (uid ausdrücklich erlaubt)
+    const sess: SessionPayload = {
+      role: obj.role,
+      lastname: obj.lastname,
+      uid: obj.uid,
+      ts: obj.ts
+    };
+    if (!sess.role) return null;
+    return sess;
+  }catch{
+    return null;
+  }
+}
+
+export function touchPresence(res: NextApiResponse, sess: SessionPayload){
+  setSessionCookie(res, { ...sess, ts: Date.now() });
+}
+/**
+ * Admin-Guard: lässt Admins durch; antwortet sonst 401 und gibt null zurück.
+ * In Dev kann per ADMIN_AUTH_DISABLED=1 gebypasst werden.
+ */
+export function requireAdmin(req: NextApiRequest, res: NextApiResponse): SessionPayload | null {
+  // Dev-Bypass: wie basicAuthGuard – nützlich für lokale Entwicklung
+  if (String(process.env.ADMIN_AUTH_DISABLED || "0") === "1") {
+    // Wenn schon Session existiert, nutze sie; sonst synthetische Admin-Session (nur Dev!)
+    return readSessionFromReq(req) || ({ role: "admin", ts: Date.now() } as any);
+  }
+
+  const sess = readSessionFromReq(req);
+  if (!sess || sess.role !== "admin") {
+    res.status(401).json({ ok: false, error: "admin only" });
+    return null;
+  }
+  return sess;
+}

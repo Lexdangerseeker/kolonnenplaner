@@ -1,0 +1,305 @@
+﻿import React, { useEffect, useMemo, useState } from "react";
+
+/**
+ * Statistik pro Baustelle
+ * - Bindet /api/admin/statistik/baustellen an
+ * - Zeigt Zeitraum (von/bis) + Dauer (Tage)
+ * - Gesamtstunden (Projekt gesamt)
+ * - Durchgänge
+ * - Entsorgung (m³) pro Jahr (wählbar)
+ * - Arbeitsgänge: Datums-Liste (ausklappbar)
+ *
+ * Fail-safe: Wenn die API manche Felder nicht liefert, werden die Zellen leer angezeigt.
+ */
+
+type BaustelleRow = {
+  id: string;
+  name: string;
+  kunde?: string | null;
+
+  // Zeitraum
+  zeitraum_von?: string | null;   // yyyy-MM-dd
+  zeitraum_bis?: string | null;   // yyyy-MM-dd
+
+  // Summen
+  gesamt_stunden?: number | null; // Projektweite Summe
+  durchgaenge?: number | null;
+
+  // Entsorgung
+  entsorgung_total_m3_year?: number | null;      // direkte Summe für gewähltes Jahr
+  entsorgung_by_year?: Record<string, number> | null; // optional: Jahr->m³
+
+  // Arbeitsgänge (Datums-Liste)
+  arbeitsgaenge_dates?: string[] | null; // yyyy-MM-dd[]
+};
+
+type ApiResponse =
+  | { ok: true; items: BaustelleRow[]; csv_url?: string | null; years?: string[] | null }
+  | { ok: false; error: string };
+
+function toYyyyMm(d = new Date()) {
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  return `${d.getFullYear()}-${m}`;
+}
+function currentYear() {
+  return String(new Date().getFullYear());
+}
+function deDate(str: string | null | undefined): string {
+  if (!str) return "";
+  const m = str.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (m) return `${m[3]}.${m[2]}.${m[1]}`;
+  return str;
+}
+function daysBetween(a?: string | null, b?: string | null): number | null {
+  if (!a || !b) return null;
+  const ma = a.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  const mb = b.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!ma || !mb) return null;
+  const da = new Date(Number(ma[1]), Number(ma[2]) - 1, Number(ma[3]));
+  const db = new Date(Number(mb[1]), Number(mb[2]) - 1, Number(mb[3]));
+  const ms = new Date(db.getFullYear(), db.getMonth(), db.getDate()).getTime()
+           - new Date(da.getFullYear(), da.getMonth(), da.getDate()).getTime();
+  return Math.round(ms / (1000 * 60 * 60 * 24)) + 1; // inkl. beide Tage
+}
+
+export default function StatistikBaustellen() {
+  const [month, setMonth] = useState<string>(toYyyyMm());
+  const [year, setYear] = useState<string>(currentYear());
+  const [rows, setRows] = useState<BaustelleRow[]>([]);
+  const [yearsFromApi, setYearsFromApi] = useState<string[]>([]);
+  const [csvUrl, setCsvUrl] = useState<string | null>(null);
+  const [loading, setLoading] = useState<boolean>(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [open, setOpen] = useState<Record<string, boolean>>({}); // Toggle für Datums-Liste
+
+  // Params: year + optional month (für kompatible Backends, die einen Zeitraum brauchen)
+  const query = useMemo(() => {
+    const q = new URLSearchParams();
+    if (year) q.set("year", year);
+    if (month) q.set("month", month); // wird ignoriert, wenn Backend es nicht nutzt
+    // Optional: Details anfordern
+    q.set("with_dates", "1");
+    q.set("with_entsorgung_years", "1");
+    return q.toString();
+  }, [year, month]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setErr(null);
+
+    fetch("/api/admin/statistik/baustellen?" + query, { method: "GET" })
+      .then(async (r) => {
+        if (!r.ok) throw new Error(\`HTTP \${r.status}\`);
+        return (await r.json()) as ApiResponse;
+      })
+      .then((data) => {
+        if (cancelled) return;
+        if (!data || (data as any).ok === false) {
+          setErr((data as any)?.error || "Unbekannter API-Fehler");
+          setRows([]);
+          setCsvUrl(null);
+          setYearsFromApi([]);
+        } else {
+          const ok = data as Extract<ApiResponse, { ok: true }>;
+          setRows(ok.items || []);
+          setCsvUrl(ok.csv_url || null);
+          const apiYears = (ok.years || []).filter(Boolean) as string[];
+          if (apiYears.length > 0) {
+            setYearsFromApi(apiYears);
+            if (!apiYears.includes(year)) setYear(apiYears[0]);
+          }
+        }
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setErr("Konnte /api/admin/statistik/baustellen nicht laden. " + (e?.message || e));
+        setRows([]);
+        setCsvUrl(null);
+        setYearsFromApi([]);
+      })
+      .finally(() => !cancelled && setLoading(false));
+
+    return () => { cancelled = true; };
+  }, [query]);
+
+  // Summen oben
+  const sumStunden = rows.reduce((acc, r) => acc + (typeof r.gesamt_stunden === "number" ? r.gesamt_stunden : 0), 0);
+  const sumDurchgaenge = rows.reduce((acc, r) => acc + (typeof r.durchgaenge === "number" ? r.durchgaenge : 0), 0);
+  const sumEntsorgung = rows.reduce((acc, r) => {
+    let m3 = 0;
+    if (r.entsorgung_by_year && r.entsorgung_by_year[year] != null) {
+      m3 = r.entsorgung_by_year[year]!;
+    } else if (typeof r.entsorgung_total_m3_year === "number") {
+      m3 = r.entsorgung_total_m3_year;
+    }
+    return acc + m3;
+  }, 0);
+
+  // UI: Jahresliste (aus API oder einfache Fallback-Auswahl +/-2 Jahre)
+  const yearOptions = yearsFromApi.length
+    ? yearsFromApi
+    : [String(Number(currentYear()) - 1), currentYear(), String(Number(currentYear()) + 1)];
+
+  return (
+    <div className="p-4 space-y-4">
+      <h1 className="text-2xl font-bold">Statistik – Baustellen</h1>
+
+      {/* Filterleiste */}
+      <div className="flex flex-wrap items-end gap-3">
+        <div>
+          <label className="block text-sm font-medium">Jahr (Entsorgung)</label>
+          <select
+            className="border rounded px-2 py-1"
+            value={year}
+            onChange={(e) => setYear(e.target.value)}
+          >
+            {yearOptions.map((y) => (
+              <option key={y} value={y}>{y}</option>
+            ))}
+          </select>
+        </div>
+
+        <div>
+          <label className="block text-sm font-medium">Monat (optional)</label>
+          <input
+            type="month"
+            className="border rounded px-2 py-1"
+            value={month}
+            onChange={(e) => setMonth(e.target.value)}
+          />
+        </div>
+
+        <button
+          className="bg-blue-600 text-white px-3 py-2 rounded disabled:opacity-50"
+          onClick={() => setYear((y) => y)}
+          disabled={loading}
+        >
+          Aktualisieren
+        </button>
+
+        {csvUrl && (
+          <a
+            className="bg-green-600 text-white px-3 py-2 rounded"
+            href={csvUrl}
+            target="_blank"
+            rel="noreferrer"
+          >
+            CSV herunterladen
+          </a>
+        )}
+      </div>
+
+      {/* Hinweise / Fehler */}
+      {loading && <div className="text-gray-600">Lade Daten…</div>}
+      {err && <div className="text-red-700">{err}</div>}
+
+      {/* KPI-Übersicht oben */}
+      <div className="p-3 border rounded bg-gray-50 flex flex-wrap gap-6">
+        <div>
+          <div className="text-sm text-gray-600">Anzahl Baustellen</div>
+          <div className="text-xl font-semibold">{rows.length}</div>
+        </div>
+        <div>
+          <div className="text-sm text-gray-600">Gesamtstunden (Projekt gesamt, Summe)</div>
+          <div className="text-xl font-semibold">{sumStunden.toFixed(2)}</div>
+        </div>
+        <div>
+          <div className="text-sm text-gray-600">Durchgänge (Summe)</div>
+          <div className="text-xl font-semibold">{sumDurchgaenge}</div>
+        </div>
+        <div>
+          <div className="text-sm text-gray-600">Entsorgung {year} (m³, Summe)</div>
+          <div className="text-xl font-semibold">{sumEntsorgung.toFixed(2)}</div>
+        </div>
+      </div>
+
+      {/* Tabelle */}
+      <div className="overflow-auto border rounded">
+        <table className="min-w-full text-sm">
+          <thead className="bg-gray-100">
+            <tr>
+              <th className="p-2 text-left">Baustelle</th>
+              <th className="p-2 text-left">Kunde</th>
+              <th className="p-2 text-left">Zeitraum</th>
+              <th className="p-2 text-right">Dauer (Tage)</th>
+              <th className="p-2 text-right">Gesamtstunden</th>
+              <th className="p-2 text-right">Durchgänge</th>
+              <th className="p-2 text-right">Entsorgung {year} (m³)</th>
+              <th className="p-2 text-left">Arbeitsgänge (Daten)</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => {
+              const dauer = daysBetween(r.zeitraum_von || null, r.zeitraum_bis || null);
+              const entsYear =
+                (r.entsorgung_by_year && r.entsorgung_by_year[year] != null)
+                  ? r.entsorgung_by_year[year]
+                  : (typeof r.entsorgung_total_m3_year === "number" ? r.entsorgung_total_m3_year : null);
+
+              return (
+                <React.Fragment key={r.id}>
+                  <tr className="border-t align-top">
+                    <td className="p-2">{r.name}</td>
+                    <td className="p-2">{r.kunde || ""}</td>
+                    <td className="p-2">
+                      {deDate(r.zeitraum_von)} {r.zeitraum_von ? "–" : ""} {deDate(r.zeitraum_bis)}
+                    </td>
+                    <td className="p-2 text-right">{dauer ?? ""}</td>
+                    <td className="p-2 text-right">
+                      {typeof r.gesamt_stunden === "number" ? r.gesamt_stunden.toFixed(2) : ""}
+                    </td>
+                    <td className="p-2 text-right">
+                      {typeof r.durchgaenge === "number" ? r.durchgaenge : ""}
+                    </td>
+                    <td className="p-2 text-right">
+                      {typeof entsYear === "number" ? entsYear.toFixed(2) : ""}
+                    </td>
+                    <td className="p-2">
+                      {r.arbeitsgaenge_dates && r.arbeitsgaenge_dates.length > 0 ? (
+                        <button
+                          className="bg-blue-600 text-white px-2 py-1 rounded"
+                          onClick={() => setOpen((o) => ({ ...o, [r.id]: !o[r.id] }))}
+                        >
+                          {open[r.id] ? "verbergen" : "anzeigen"}
+                        </button>
+                      ) : (
+                        <span className="text-gray-500">–</span>
+                      )}
+                    </td>
+                  </tr>
+                  {open[r.id] && r.arbeitsgaenge_dates && (
+                    <tr className="border-t bg-gray-50">
+                      <td className="p-2" colSpan={8}>
+                        <div className="flex gap-2 flex-wrap">
+                          {r.arbeitsgaenge_dates.map((d, idx) => (
+                            <span key={idx} className="px-2 py-1 border rounded bg-white">
+                              {deDate(d)}
+                            </span>
+                          ))}
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                </React.Fragment>
+              );
+            })}
+            {rows.length === 0 && !loading && !err && (
+              <tr>
+                <td className="p-2 text-gray-500" colSpan={8}>
+                  Keine Daten gefunden.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      {/* Hinweisblock */}
+      <div className="text-xs text-gray-500">
+        Tipp: Wenn deine API statt <code>entsorgung_total_m3_year</code> lieber ein Mapping <code>entsorgung_by_year</code> liefert,
+        wird automatisch der Wert für das gewählte Jahr genutzt. Datumsfelder werden als <code>yyyy-MM-dd</code> erwartet.
+      </div>
+    </div>
+  );
+}

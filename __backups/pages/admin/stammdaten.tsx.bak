@@ -1,0 +1,521 @@
+﻿import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
+import StammdatenTabs from "../../components/StammdatenTabs";
+
+/** ===== Helpers (lokale Mitternacht) ===== */
+function todayISO(): string {
+  const d = new Date(); const y=d.getFullYear(), m=String(d.getMonth()+1).padStart(2,"0"), dd=String(d.getDate()).padStart(2,"0");
+  return `${y}-${m}-${dd}`;
+}
+function addDaysISO(iso: string, n: number): string {
+  const d=new Date(`${iso}T00:00:00`); d.setDate(d.getDate()+n);
+  const y=d.getFullYear(), m=String(d.getMonth()+1).padStart(2,"0"), dd=String(d.getDate()).padStart(2,"0");
+  return `${y}-${m}-${dd}`;
+}
+function cmpISO(a: string, b: string): number { if(a===b) return 0; return a<b?-1:1; }
+function computeNext(startISO: string, rhythm: number, today = todayISO()): string {
+  let next = startISO;
+  while (cmpISO(next, today) < 0) next = addDaysISO(next, rhythm);
+  return next;
+}
+function fmtDE(iso?: string|null): string { if(!iso) return "—"; const [y,m,d]=String(iso).split("-"); return `${d}.${m}.${y}`; }
+
+/** ===== Types ===== */
+type B = {
+  id: string;
+  name?: string|null;
+  projekt_nr?: string|null;
+  kunden_nr?: string|null;
+  strasse?: string|null; hausnummer?: string|null; plz?: string|null; ort?: string|null;
+  telefon?: string|null; email?: string|null;
+  start_datum?: string|null; rhythmus_tage?: number|null;
+  aktiv?: boolean|null; archiviert_am?: string|null;
+  notizen?: string|null; lv_urls?: string[]|null;
+};
+type ApiList = { ok: boolean; items?: B[]; error?: string };
+type ApiGet  = { ok: boolean; item?: B; error?: string };
+type ApiUpd  = { ok: boolean; item?: B; error?: string };
+type Status = "alle"|"aktiv"|"archiv";
+
+/** ===== UI ===== */
+export default function AdminStammdaten() {
+  const [items, setItems] = useState<B[]>([]);
+  const [status, setStatus] = useState<Status>("alle");
+  const [q, setQ] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [msg, setMsg] = useState<string>("");
+  const [err, setErr] = useState<string>("");
+
+  const [sel, setSel] = useState<B|null>(null);
+  const [edit, setEdit] = useState<B|null>(null);
+  const [showCreate, setShowCreate] = useState<boolean>(false);
+  const [createData, setCreateData] = useState<B>({ id:"", name:"", projekt_nr:"", kunden_nr:"", start_datum:null, rhythmus_tage: 21, aktiv:true });
+
+  async function load() {
+    setLoading(true); setErr(""); setMsg("");
+    try {
+      const r = await fetch(`/api/admin/baustellen/list?status=${status}&q=${encodeURIComponent(q)}`, { cache:"no-store" });
+      const j: ApiList = await r.json();
+      if (!j.ok) throw new Error(j.error || "Fehler beim Laden");
+      setItems(j.items || []);
+    } catch (e:any) {
+      setErr(e?.message || String(e));
+      setItems([]);
+    } finally {
+      setLoading(false);
+    }
+  }
+  useEffect(()=>{ load(); /* status ändert Filter */ },[status]);
+
+  async function onEdit(id: string) {
+    setMsg(""); setErr("");
+    try {
+      const r = await fetch(`/api/admin/baustellen/get?id=${id}`);
+      const j: ApiGet = await r.json();
+      if (!j.ok || !j.item) throw new Error(j.error || "Nicht gefunden");
+      const rt = (j.item.rhythmus_tage==null? null : Number(j.item.rhythmus_tage));
+      setSel(j.item);
+      setEdit({ ...j.item, rhythmus_tage: Number.isFinite(rt as any) ? rt : null });
+      // Sidebar sichtbar
+      const panel = document.getElementById("editPanel");
+      if (panel) panel.scrollIntoView({ behavior: "smooth", block: "start" });
+    } catch (e:any) {
+      setErr(e?.message || String(e));
+    }
+  }
+
+  function addr(b:B) {
+    const parts = [b.strasse, b.hausnummer, [b.plz,b.ort].filter(Boolean).join(" ")].filter(Boolean);
+    return parts.join(", ");
+  }
+  function rhythmText(b:B) {
+    const t = (b.rhythmus_tage==null? 0 : Number(b.rhythmus_tage));
+    return t===0 ? "fest" : `${t} Tage`;
+  }
+  function invalidFestStart(): boolean {
+    if (!edit) return false;
+    const rt = edit.rhythmus_tage==null ? 0 : Number(edit.rhythmus_tage);
+    const isFest = (rt===0);
+    const start = (edit.start_datum||"").slice(0,10);
+    return isFest && !!start && start < todayISO();
+  }
+
+  async function save() {
+    if (!edit) return;
+    if (invalidFestStart()) { setMsg(""); setErr("Fester Termin darf nicht in der Vergangenheit liegen."); return; }
+    setMsg(""); setErr("");
+    try {
+      const r = await fetch("/api/admin/baustellen/update", {
+        method:"POST", headers:{ "Content-Type":"application/json" },
+        body: JSON.stringify(edit)
+      });
+      const j: ApiUpd = await r.json();
+      if (!j.ok) throw new Error(j.error || "Fehler beim Speichern");
+      setSel(j.item!); setEdit(j.item!);
+      setMsg("Gespeichert ✓"); setTimeout(()=>setMsg(""), 2000);
+      load();
+    } catch (e:any) { setErr(e?.message || String(e)); }
+  }
+
+  async function toggleArchiv(toArchiv: boolean) {
+    if (!sel) return;
+    setMsg(""); setErr("");
+    try {
+      const r = await fetch("/api/admin/baustellen/update", {
+        method:"POST", headers:{ "Content-Type":"application/json" },
+        body: JSON.stringify({ id: sel.id, archivieren: toArchiv })
+      });
+      const j: ApiUpd = await r.json();
+      if (!j.ok) throw new Error(j.error || "Fehler beim (De-)Archivieren");
+      setSel(j.item!); setEdit(j.item!);
+      load();
+    } catch (e:any) { setErr(e?.message || String(e)); }
+  }
+
+  async function hardDelete() {
+    if (!sel) return;
+    if (!confirm("Wirklich endgültig löschen? Dieser Vorgang kann nicht rückgängig gemacht werden.")) return;
+    setMsg(""); setErr("");
+    try {
+      const r = await fetch("/api/admin/baustellen/update", {
+        method:"POST", headers:{ "Content-Type":"application/json" },
+        body: JSON.stringify({ id: sel.id, hard_delete: true })
+      });
+      const j: ApiUpd = await r.json();
+      if (!j.ok) throw new Error(j.error || "Löschen fehlgeschlagen (Backend unterstützt evtl. nur Archivieren).");
+      setSel(null); setEdit(null);
+      setMsg("Gelöscht ✓"); setTimeout(()=>setMsg(""), 2000);
+      load();
+    } catch (e:any) { setErr(e?.message || String(e)); }
+  }
+
+  async function createNew() {
+    setMsg(""); setErr("");
+    try {
+      // Upsert bevorzugen
+      let r = await fetch("/api/admin/baustellen/upsert", {
+        method:"POST", headers:{ "Content-Type":"application/json" },
+        body: JSON.stringify(createData)
+      });
+      if (!r.ok) {
+        // Fallback: create (ältere Route)
+        r = await fetch("/api/admin/baustelle/create", {
+          method:"POST", headers:{ "Content-Type":"application/json" },
+          body: JSON.stringify(createData)
+        });
+      }
+      const j = await r.json();
+      if (!r.ok || !j?.ok) throw new Error(j?.error || "Anlegen fehlgeschlagen");
+      setShowCreate(false);
+      setCreateData({ id:"", name:"", projekt_nr:"", kunden_nr:"", start_datum:null, rhythmus_tage:21, aktiv:true });
+      setMsg("Angelegt ✓"); setTimeout(()=>setMsg(""),2000);
+      load();
+    } catch (e:any) { setErr(e?.message || String(e)); }
+  }
+
+  function addLvUrl() {
+    if (!edit) return;
+    const url = prompt("Externe PDF-URL einfügen:");
+    if (!url) return;
+    const next = [ ...(edit.lv_urls||[]), url ];
+    setEdit({ ...edit, lv_urls: next });
+  }
+  function delLvUrl(i: number) {
+    if (!edit) return;
+    const next = (edit.lv_urls||[]).slice(); next.splice(i,1);
+    setEdit({ ...edit, lv_urls: next });
+  }
+
+  const filtered = useMemo(()=>items, [items]);
+
+  // Vorschau Nächster Termin im Editor
+  const nextPreview = useMemo(()=>{
+    if (!edit) return null;
+    const rt = edit.rhythmus_tage==null? null : Number(edit.rhythmus_tage);
+    if (!rt || rt<=0 || !edit.start_datum) return null;
+    return computeNext(edit.start_datum.slice(0,10), rt, todayISO());
+  }, [edit]);
+
+  return (
+    <div className="min-h-screen bg-gradient-to-b from-slate-50 to-slate-100">
+      <div className="sticky top-0 z-20 backdrop-blur bg-white/70 border-b">
+        <div className="max-w-7xl mx-auto px-4 py-3 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <h1 className="text-xl font-semibold">Admin · Stammdaten</h1>
+            <span className="px-2 py-0.5 text-xs rounded bg-emerald-100 text-emerald-700">Baustellen</span>
+          </div>
+          <nav className="text-sm flex items-center gap-4">
+            <Link className="hover:underline" href="/admin">Admin</Link>
+            <Link className="hover:underline" href="/dauerpflegeeinsaetze">Dauerpflegeeinsätze</Link>
+            <Link className="hover:underline" href="/einsaetzeMH">Einsätze</Link>
+          </nav>
+        </div>
+      </div>
+
+      <StammdatenTabs active="baustellen" />
+
+      <main className="max-w-7xl mx-auto px-4 py-5 space-y-5">
+        {/* Kopfzeile mit Aktionen */}
+        <div className="flex flex-wrap items-center gap-2">
+          <input
+            value={q} onChange={e=>setQ(e.target.value)} onKeyDown={e=>{ if(e.key==="Enter") load(); }}
+            placeholder="Suche (Name, PN, KNr, Adresse …)"
+            className="px-3 py-2 border rounded-lg bg-white shadow-sm min-w-[280px]"
+          />
+          <select value={status} onChange={e=>setStatus(e.target.value as Status)} className="px-3 py-2 border rounded-lg bg-white shadow-sm">
+            <option value="alle">Alle</option>
+            <option value="aktiv">Aktiv</option>
+            <option value="archiv">Archiv</option>
+          </select>
+          <button onClick={load} disabled={loading} className="px-3 py-2 border rounded-lg bg-white shadow-sm">
+            {loading ? "Lädt…" : "Aktualisieren"}
+          </button>
+
+          <div className="ml-auto flex items-center gap-2">
+            <button onClick={()=>setShowCreate(true)} className="px-3 py-2 rounded-lg bg-emerald-600 text-white shadow hover:bg-emerald-700">
+              + Neu anlegen
+            </button>
+            <span className="text-emerald-700 text-sm">{msg}</span>
+          </div>
+        </div>
+
+        {/* Inhalt: Liste + Editor */}
+        <div className="grid grid-cols-1 lg:grid-cols-[1fr,420px] gap-4">
+          {/* Liste */}
+          <div className="bg-white border rounded-2xl shadow-sm overflow-hidden">
+            <table className="w-full text-sm">
+              <thead className="bg-slate-50">
+                <tr className="[&>th]:text-left [&>th]:px-3 [&>th]:py-2">
+                  <th>Name</th>
+                  <th>Projekt-Nr.</th>
+                  <th>Kunden-Nr.</th>
+                  <th>Adresse</th>
+                  <th>Start</th>
+                  <th>Rhythmus</th>
+                  <th>Status</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+              {filtered.map(b=>(
+                <tr key={b.id} className="border-t hover:bg-slate-50">
+                  <td className="px-3 py-2">{b.name || "—"}</td>
+                  <td className="px-3 py-2 font-mono">{b.projekt_nr || "—"}</td>
+                  <td className="px-3 py-2 font-mono">{b.kunden_nr || "—"}</td>
+                  <td className="px-3 py-2">{addr(b) || "—"}</td>
+                  <td className="px-3 py-2">{b.start_datum || "—"}</td>
+                  <td className="px-3 py-2">{rhythmText(b)}</td>
+                  <td className="px-3 py-2">
+                    {(b.aktiv!==false && !b.archiviert_am)
+                      ? <span className="px-2 py-0.5 text-xs rounded bg-emerald-100 text-emerald-700">Aktiv</span>
+                      : <span className="px-2 py-0.5 text-xs rounded bg-slate-200 text-slate-700">Archiv</span>}
+                  </td>
+                  <td className="px-3 py-2">
+                    <button onClick={()=>onEdit(b.id)} className="px-2 py-1 border rounded-lg bg-white shadow-sm hover:bg-slate-50">Bearbeiten</button>
+                  </td>
+                </tr>
+              ))}
+              {filtered.length===0 && (
+                <tr><td colSpan={8} className="px-4 py-6 text-center text-slate-500">Keine Einträge</td></tr>
+              )}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Editor */}
+          <div id="editPanel" className="bg-white border rounded-2xl shadow-sm p-4">
+            <div className="flex items-center justify-between mb-2">
+              <div className="font-semibold">Bearbeiten</div>
+              <div className="flex items-center gap-2">
+                {sel && ((sel.aktiv!==false && !sel.archiviert_am) ? (
+                  <button onClick={()=>toggleArchiv(true)} className="px-2 py-1 border rounded-lg bg-white hover:bg-slate-50">Archivieren</button>
+                ) : sel && (
+                  <button onClick={()=>toggleArchiv(false)} className="px-2 py-1 border rounded-lg bg-white hover:bg-slate-50">Reaktivieren</button>
+                ))}
+                <button onClick={save} disabled={!edit || invalidFestStart()} className="px-3 py-1.5 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700">Speichern</button>
+              </div>
+            </div>
+
+            {!edit && <div className="text-slate-500 text-sm">Wähle links eine Baustelle aus.</div>}
+            {edit && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <label className="text-sm">Name
+                  <input value={edit.name||""} onChange={e=>setEdit({...edit!, name:e.target.value})}
+                         className="mt-1 px-3 py-2 border rounded-lg w-full" />
+                </label>
+                <label className="text-sm">Aktiv
+                  <select
+                    value={(edit.aktiv!==false && !edit.archiviert_am) ? "1":"0"}
+                    onChange={e=>setEdit({...edit!, aktiv:e.target.value==="1", archiviert_am: e.target.value==="1"?null: (edit.archiviert_am||new Date().toISOString())})}
+                    className="mt-1 px-3 py-2 border rounded-lg w-full"
+                  >
+                    <option value="1">Ja</option>
+                    <option value="0">Nein</option>
+                  </select>
+                </label>
+
+                <label className="text-sm">Projekt-Nr.
+                  <input value={edit.projekt_nr||""} onChange={e=>setEdit({...edit!, projekt_nr:e.target.value})}
+                         className="mt-1 px-3 py-2 border rounded-lg w-full font-mono" />
+                </label>
+                <label className="text-sm">Kunden-Nr.
+                  <input value={edit.kunden_nr||""} onChange={e=>setEdit({...edit!, kunden_nr:e.target.value})}
+                         className="mt-1 px-3 py-2 border rounded-lg w-full font-mono" />
+                </label>
+
+                <label className="text-sm">Straße
+                  <input value={edit.strasse||""} onChange={e=>setEdit({...edit!, strasse:e.target.value})}
+                         className="mt-1 px-3 py-2 border rounded-lg w-full" />
+                </label>
+                <label className="text-sm">Hausnummer
+                  <input value={edit.hausnummer||""} onChange={e=>setEdit({...edit!, hausnummer:e.target.value})}
+                         className="mt-1 px-3 py-2 border rounded-lg w-full" />
+                </label>
+
+                <label className="text-sm">PLZ
+                  <input value={edit.plz||""} onChange={e=>setEdit({...edit!, plz:e.target.value})}
+                         className="mt-1 px-3 py-2 border rounded-lg w-full" />
+                </label>
+                <label className="text-sm">Ort
+                  <input value={edit.ort||""} onChange={e=>setEdit({...edit!, ort:e.target.value})}
+                         className="mt-1 px-3 py-2 border rounded-lg w-full" />
+                </label>
+
+                <label className="text-sm">Start (YYYY-MM-DD)
+                  <input value={edit.start_datum||""} onChange={e=>setEdit({...edit!, start_datum:e.target.value})}
+                         className="mt-1 px-3 py-2 border rounded-lg w-full font-mono" placeholder="2025-09-04" />
+                </label>
+                <label className="text-sm">Rhythmus (Tage) – 0 = fest
+                  <div className="mt-1 grid grid-cols-[1fr,auto] gap-2">
+                    <input type="number" min={0}
+                           value={edit.rhythmus_tage==null ? 0 : Number(edit.rhythmus_tage)}
+                           onChange={e=>setEdit({...edit!, rhythmus_tage: Math.max(0, parseInt(e.target.value||"0",10))})}
+                           className="px-3 py-2 border rounded-lg w-full" />
+                    <div className="flex gap-1">
+                      {[0,7,14,21,28,365].map(n=>(
+                        <button key={n} type="button" onClick={()=>setEdit(e=> e? { ...e, rhythmus_tage: n }: e)}
+                                className="px-2 py-1 border rounded-lg bg-white hover:bg-slate-50">{n}</button>
+                      ))}
+                    </div>
+                  </div>
+                </label>
+
+                {invalidFestStart() && (
+                  <div className="sm:col-span-2 text-red-700 text-sm">
+                    Hinweis: Bei festem Termin (Rhythmus 0) darf der Start nicht in der Vergangenheit liegen.
+                  </div>
+                )}
+
+                <label className="text-sm">Telefon
+                  <input value={edit.telefon||""} onChange={e=>setEdit({...edit!, telefon:e.target.value})}
+                         className="mt-1 px-3 py-2 border rounded-lg w-full" />
+                </label>
+                <label className="text-sm">E-Mail
+                  <input value={edit.email||""} onChange={e=>setEdit({...edit!, email:e.target.value})}
+                         className="mt-1 px-3 py-2 border rounded-lg w-full" />
+                </label>
+
+                {/* Next Preview */}
+                <div className="sm:col-span-2 bg-slate-50 border rounded-xl p-3 text-sm">
+                  <div className="font-medium">Vorschau</div>
+                  <div className="mt-1 flex flex-wrap gap-4">
+                    <div>Start: <strong>{fmtDE(edit.start_datum)}</strong></div>
+                    <div>Rhythmus: <strong>{edit.rhythmus_tage ?? "—"}</strong> Tage</div>
+                    <div>Nächster Termin: <strong>{nextPreview? fmtDE(nextPreview) : "—"}</strong></div>
+                  </div>
+                </div>
+
+                {/* Notizen */}
+                <label className="text-sm sm:col-span-2">Notizen
+                  <textarea value={edit.notizen||""} onChange={e=>setEdit({...edit!, notizen:e.target.value})}
+                            rows={4} className="mt-1 px-3 py-2 border rounded-lg w-full" />
+                </label>
+
+                {/* LV-Links */}
+                <div className="sm:col-span-2">
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="font-medium">Leistungsverzeichnisse (PDF-Links)</div>
+                    <button onClick={addLvUrl} className="px-2 py-1 border rounded-lg bg-white hover:bg-slate-50">+ Link</button>
+                  </div>
+                  <ul className="list-disc pl-5">
+                    {(edit.lv_urls||[]).map((u,i)=>(
+                      <li key={i} className="mb-1">
+                        <a href={u} target="_blank" rel="noreferrer" className="text-blue-700 underline break-all">{u}</a>
+                        <button onClick={()=>delLvUrl(i)} className="ml-2 px-2 py-0.5 border rounded-lg bg-white hover:bg-slate-50 text-xs">Entfernen</button>
+                      </li>
+                    ))}
+                    {(edit.lv_urls||[]).length===0 && <li className="text-slate-500">Keine Links hinterlegt.</li>}
+                  </ul>
+                </div>
+
+                {/* Danger-Zone */}
+                <div className="sm:col-span-2 border rounded-xl p-3 bg-red-50">
+                  <div className="font-semibold text-red-700 mb-2">Danger Zone</div>
+                  <div className="flex flex-wrap gap-2">
+                    {(sel && (sel.aktiv!==false && !sel.archiviert_am)) ? (
+                      <button onClick={()=>toggleArchiv(true)} className="px-3 py-1.5 border rounded-lg bg-white hover:bg-slate-50">Archivieren</button>
+                    ) : (
+                      <button onClick={()=>toggleArchiv(false)} className="px-3 py-1.5 border rounded-lg bg-white hover:bg-slate-50">Reaktivieren</button>
+                    )}
+                    <button onClick={hardDelete} className="px-3 py-1.5 rounded-lg bg-red-600 text-white hover:bg-red-700">Endgültig löschen</button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {(err || msg) && (
+              <div className="mt-3 text-sm">
+                {err && <div className="text-red-700">{err}</div>}
+                {!err && msg && <div className="text-emerald-700">{msg}</div>}
+              </div>
+            )}
+          </div>
+        </div>
+      </main>
+
+      <footer className="py-6" />
+
+      {/* Create Modal */}
+      {showCreate && (
+        <div className="fixed inset-0 z-40 bg-black/40 flex items-center justify-center p-4">
+          <div className="w-full max-w-2xl bg-white rounded-2xl shadow-xl p-5">
+            <div className="flex items-center justify-between mb-3">
+              <div className="text-lg font-semibold">Baustelle anlegen</div>
+              <button onClick={()=>setShowCreate(false)} className="px-2 py-1 border rounded-lg bg-white">Schließen</button>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <label className="text-sm">Name
+                <input value={createData.name||""} onChange={e=>setCreateData({...createData, name:e.target.value})}
+                       className="mt-1 px-3 py-2 border rounded-lg w-full" />
+              </label>
+              <label className="text-sm">Aktiv
+                <select value={(createData.aktiv!==false) ? "1":"0"} onChange={e=>setCreateData({...createData, aktiv: e.target.value==="1"})}
+                        className="mt-1 px-3 py-2 border rounded-lg w-full">
+                  <option value="1">Ja</option><option value="0">Nein</option>
+                </select>
+              </label>
+
+              <label className="text-sm">Projekt-Nr.
+                <input value={createData.projekt_nr||""} onChange={e=>setCreateData({...createData, projekt_nr:e.target.value})}
+                       className="mt-1 px-3 py-2 border rounded-lg w-full font-mono" />
+              </label>
+              <label className="text-sm">Kunden-Nr.
+                <input value={createData.kunden_nr||""} onChange={e=>setCreateData({...createData, kunden_nr:e.target.value})}
+                       className="mt-1 px-3 py-2 border rounded-lg w-full font-mono" />
+              </label>
+
+              <label className="text-sm">Straße
+                <input value={createData.strasse||""} onChange={e=>setCreateData({...createData, strasse:e.target.value})}
+                       className="mt-1 px-3 py-2 border rounded-lg w-full" />
+              </label>
+              <label className="text-sm">Hausnummer
+                <input value={createData.hausnummer||""} onChange={e=>setCreateData({...createData, hausnummer:e.target.value})}
+                       className="mt-1 px-3 py-2 border rounded-lg w-full" />
+              </label>
+
+              <label className="text-sm">PLZ
+                <input value={createData.plz||""} onChange={e=>setCreateData({...createData, plz:e.target.value})}
+                       className="mt-1 px-3 py-2 border rounded-lg w-full" />
+              </label>
+              <label className="text-sm">Ort
+                <input value={createData.ort||""} onChange={e=>setCreateData({...createData, ort:e.target.value})}
+                       className="mt-1 px-3 py-2 border rounded-lg w-full" />
+              </label>
+
+              <label className="text-sm">Start (YYYY-MM-DD)
+                <input value={createData.start_datum||""} onChange={e=>setCreateData({...createData, start_datum:e.target.value})}
+                       className="mt-1 px-3 py-2 border rounded-lg w-full font-mono" placeholder="2025-09-04" />
+              </label>
+              <label className="text-sm">Rhythmus (Tage) – 0 = fest
+                <div className="mt-1 grid grid-cols-[1fr,auto] gap-2">
+                  <input type="number" min={0}
+                         value={createData.rhythmus_tage==null ? 0 : Number(createData.rhythmus_tage)}
+                         onChange={e=>setCreateData({...createData, rhythmus_tage: Math.max(0, parseInt(e.target.value||"0",10))})}
+                         className="px-3 py-2 border rounded-lg w-full" />
+                  <div className="flex gap-1">
+                    {[0,7,14,21,28,365].map(n=>(
+                      <button key={n} type="button" onClick={()=>setCreateData(d=>({ ...d, rhythmus_tage: n }))}
+                              className="px-2 py-1 border rounded-lg bg-white hover:bg-slate-50">{n}</button>
+                    ))}
+                  </div>
+                </div>
+              </label>
+
+              <label className="text-sm sm:col-span-2">Notizen
+                <textarea value={createData.notizen||""} onChange={e=>setCreateData({...createData, notizen:e.target.value})}
+                          rows={3} className="mt-1 px-3 py-2 border rounded-lg w-full" />
+              </label>
+            </div>
+
+            <div className="mt-4 flex items-center justify-end gap-2">
+              <button onClick={()=>setShowCreate(false)} className="px-3 py-2 border rounded-lg bg-white">Abbrechen</button>
+              <button onClick={createNew} className="px-3 py-2 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700">Anlegen</button>
+            </div>
+
+            {err && <div className="mt-2 text-red-700 text-sm">{err}</div>}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}

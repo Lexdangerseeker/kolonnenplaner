@@ -1,0 +1,37 @@
+﻿import type { NextApiRequest, NextApiResponse } from "next";
+import { supabaseAdmin } from "../../../lib/supabaseServer";
+
+export default async function handler(req: NextApiRequest, res: NextApiResponse){
+  const sb = supabaseAdmin();
+  const like = (req.query.like||"").toString().trim();
+  const limit = Math.min(parseInt((req.query.limit||"50").toString(),10)||50, 200);
+
+  const cols = ["nachname","name","vorname","vollname","anzeige_name"]; // probiere mehrere übliche Felder
+  const out:any = { ok:true, like, tried:[], items:[] };
+
+  // 1) exakte OR-Suche über vorhandene Spalten
+  for (const c of cols){
+    const r = await sb.from("mitarbeiter").select(`id, ${c}`).limit(limit).eq(c, like);
+    out.tried.push({ kind:"eq", col:c, error:r.error?.message||null, count:r.data?.length||0 });
+    if (!r.error && r.data?.length){ out.items.push(...r.data.map(d=>({id:d.id, col:c, value:d[c]}))); }
+  }
+
+  // 2) ILIKE %...% über dieselben Spalten
+  if (!out.items.length){
+    for (const c of cols){
+      const r = await sb.from("mitarbeiter").select(`id, ${c}`).limit(limit).ilike(c, `%${like}%`);
+      out.tried.push({ kind:"ilike", col:c, error:r.error?.message||null, count:r.data?.length||0 });
+      if (!r.error && r.data?.length){ out.items.push(...r.data.map(d=>({id:d.id, col:c, value:d[c]}))); }
+    }
+  }
+
+  // 3) Wenn like leer ist: einfach die ersten N Datensätze zeigen (zum Sichttest)
+  if (!like){
+    const r = await sb.from("mitarbeiter").select("id, nachname, name").limit(limit);
+    out.tried.push({ kind:"list", error:r.error?.message||null, count:r.data?.length||0 });
+    if (!r.error && r.data?.length){ out.items = r.data; }
+  }
+
+  res.setHeader("Cache-Control","no-store");
+  return res.json(out);
+}
