@@ -9,6 +9,9 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const p=(pin||"").trim(); if(p.length<4||p.length>12) return res.status(400).json({ok:false,error:"PIN ungültig (4–12 Zeichen)"});
     const hash = await bcrypt.hash(p,12);
     const { error } = await supabaseAdmin.from("mitarbeiter").update({ pin_hash:hash, pin_updated_at:new Date(), pin:null }).eq("id",id);
-    if(error) throw error; return res.status(200).json({ok:true});
-  }catch(e:any){ return res.status(500).json({ok:false,error:e?.message||"Fehler"}) }
+    if(error) throw error;
+    return res.status(200).json({ok:true});
+  }catch(e:any){
+    return res.status(500).json({ok:false,error:e?.message||"Fehler"});
+  }
 }
